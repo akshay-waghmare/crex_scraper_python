@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            // "args": ["https://crex.live/scoreboard/NQP/1GP/12th-Match/N0/N1/dsg-vs-sec-12th-match-sa20-league-2024/live"]
+        }
+    ]
+}

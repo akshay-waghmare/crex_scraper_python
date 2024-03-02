@@ -1,0 +1,16 @@
+2024-03-02 12:59:46,263 [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5000
+2024-03-02 12:59:46,263 [33mPress CTRL+C to quit[0m
+2024-03-02 13:00:37,441 127.0.0.1 - - [02/Mar/2024 13:00:37] "GET /scrape-live-matches-link HTTP/1.1" 200 -
+2024-03-02 13:00:59,572 Scraped URLs: ['/scoreboard/LQ3/1GU/1st-TEST/Q/R/aus-vs-nz-1st-test-australia-tour-of-new-zealand-2024/live', '/scoreboard/OD2/1JN/5th-Match/12/19/ned-vs-nep-5th-match-nepal-t20i-triangular-series-2024/live', '/scoreboard/OF0/1JR/1st-Semi-Final/UU/UX/dl-r-vs-mum-c-1st-semi-final-indian-veteran-premier-league-2024/live', '/scoreboard/OEK/1G7/2nd-Semi-Final/GP/H7/mum-vs-tn-2nd-semi-final-ranji-trophy-2024/live', '/scoreboard/OEJ/1G7/1st-Semi-Final/GQ/GU/mp-vs-vid-1st-semi-final-ranji-trophy-2024/live']
+2024-03-02 13:01:09,800 Scraping started for url: https://crex.live/scoreboard/LQ3/1GU/1st-TEST/Q/R/aus-vs-nz-1st-test-australia-tour-of-new-zealand-2024/live
+2024-03-02 13:01:09,800 127.0.0.1 - - [02/Mar/2024 13:01:09] "POST /start-scrape HTTP/1.1" 200 -
+2024-03-02 13:01:11,963 Scraping started for url: https://crex.live/scoreboard/OD2/1JN/5th-Match/12/19/ned-vs-nep-5th-match-nepal-t20i-triangular-series-2024/live
+2024-03-02 13:01:11,964 127.0.0.1 - - [02/Mar/2024 13:01:11] "POST /start-scrape HTTP/1.1" 200 -
+2024-03-02 13:01:14,185 Scraping started for url: https://crex.live/scoreboard/OF0/1JR/1st-Semi-Final/UU/UX/dl-r-vs-mum-c-1st-semi-final-indian-veteran-premier-league-2024/live
+2024-03-02 13:01:14,187 127.0.0.1 - - [02/Mar/2024 13:01:14] "POST /start-scrape HTTP/1.1" 200 -
+2024-03-02 13:01:16,527 Scraping started for url: https://crex.live/scoreboard/OEK/1G7/2nd-Semi-Final/GP/H7/mum-vs-tn-2nd-semi-final-ranji-trophy-2024/live
+2024-03-02 13:01:16,527 127.0.0.1 - - [02/Mar/2024 13:01:16] "POST /start-scrape HTTP/1.1" 200 -
+2024-03-02 13:01:19,146 Scraping started for url: https://crex.live/scoreboard/OEJ/1G7/1st-Semi-Final/GQ/GU/mp-vs-vid-1st-semi-final-ranji-trophy-2024/live
+2024-03-02 13:01:19,146 127.0.0.1 - - [02/Mar/2024 13:01:19] "POST /start-scrape HTTP/1.1" 200 -
+2024-03-02 13:01:19,146 Scraping started for url from scrape function: https://crex.live/scoreboard/OEJ/1G7/1st-Semi-Final/GQ/GU/mp-vs-vid-1st-semi-final-ranji-trophy-2024/live
