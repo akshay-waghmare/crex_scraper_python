@@ -30,9 +30,11 @@ def initialize_database():
     """Creates database and table if they don't exist."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+     # Create the table with the necessary columns upfront if possible
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS scraped_urls (
-            url TEXT PRIMARY KEY
+            url TEXT PRIMARY KEY,
+            deletion_attempts INTEGER DEFAULT 0
         )
     ''')
     conn.commit()
@@ -41,7 +43,7 @@ def initialize_database():
 def store_urls(urls):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.executemany("INSERT OR IGNORE INTO scraped_urls VALUES (?)", [(url,) for url in urls])
+    cursor.executemany("INSERT INTO scraped_urls (url, deletion_attempts) VALUES (?, 0) ON CONFLICT(url) DO UPDATE SET deletion_attempts = 0", [(url,) for url in urls])
     conn.commit()
     conn.close()
 
@@ -60,108 +62,105 @@ def get_changes(new_urls):
     return added_urls, deleted_urls
 
 def job():
-    interval = 60  
-    while True:
-        try:
-            url = "https://crex.live"
-            scrape(url)
-
-        except Exception as e:
-            logging.error(f"Error in periodic task: {e}")
-
-        time.sleep(interval) 
-        
-def scrape(url):
     url = "https://crex.live"
     with sync_playwright() as p:
-        try:
-            browser = p.chromium.launch(headless=False)
+            browser = p.chromium.launch(headless=True)
             context = browser.new_context()
             page = context.new_page()
 
-            # Add a listener for page errors
-            page.on('error', lambda error: logging.error(f"Uncaught error: {error.name}: {error.message}"))
+            while True:
+                try:
+                    url = "https://crex.live"
+                    scrape(page, url)
+                    time.sleep(60)
+                except Exception as e:
+                    logging.error(f"Error in periodic task: {e}")
+                    
+def scrape(page , url):
+    
+    try:
+        page.goto(url)
+        # wait for 10 seconds before clicking on the button
+        page.wait_for_timeout(10000)
+        
+        # DOM Change Detection
+        if not page.query_selector("div.live-card"):  
+            raise DOMChangeError("Cannot locate essential 'div.live-card' element")
+        
+        # Evaluate JavaScript on the page to get all div.live elements and print them out
+        live_divs = page.query_selector_all("div.live-card .live")
 
-            try:
-                page.goto(url)
-                # wait for 10 seconds before clicking on the button
-                page.wait_for_timeout(10000)
+        urls = []
+        for live_div in live_divs:
+            # Get the parent of live_div using querySelector and then get the parent of the parent
+            parent_element = live_div.query_selector(":scope >> xpath=..")
+            grandparent_element = parent_element.query_selector(":scope >> xpath=..")
+            sibling_element = grandparent_element.query_selector(":scope >> xpath=following-sibling::*[1]")
+            url = sibling_element.get_attribute('href')
+            urls.append(url)
+
+        logging.info(f"Scraped URLs: {urls}")
+
+        for url in urls:
+            # Prepend 'https://crex.live' to the URL
+            url = 'https://crex.live' + url
+        # Find changes - first, before updating state 
+        previous_urls = load_previous_urls()
+        added_urls, deleted_urls = get_changes(urls)    
+        # Treat all as added on the first run 
+        if not previous_urls:   # Check if there were no previous URLs
+            added_urls = urls
+            deleted_urls = []
+        # Now, update the database state    
+        store_urls(urls)
+        
+        if added_urls or deleted_urls:
+            # Send the URLs to your Spring Boot app
+            # fetch the bearer token from cricket-data-service
+            # start scraping if url is added 
+                # Start scraping if url is added
                 
-                # DOM Change Detection
-                if not page.query_selector("div.live-card"):  
-                    raise DOMChangeError("Cannot locate essential 'div.live-card' element")
                 
-                # Evaluate JavaScript on the page to get all div.live elements and print them out
-                live_divs = page.query_selector_all("div.live-card .live")
+                if added_urls:
+                    token = cricket_data_service.get_bearer_token()
+                    cricket_data_service.add_live_matches(urls, token)
+                    
+                    for url in added_urls:
+                        # append https://crex.live to the url
+                        url = 'https://crex.live' + url
+                        response = requests.post('http://localhost:5000/start-scrape', json={'url': url})
+                    if response.status_code == 200:
+                        logging.info(f"Scraping started for url from scrape function: {url}")
+                    else:
+                        logging.error(f"Failed to start scraping for url: {url}")
+                        # try scraping for other urls if one fails
+                
+                if deleted_urls:
+                    token = cricket_data_service.get_bearer_token()
+                    cricket_data_service.add_live_matches(urls, token)
 
-                urls = []
-                for live_div in live_divs:
-                    # Get the parent of live_div using querySelector and then get the parent of the parent
-                    parent_element = live_div.query_selector(":scope >> xpath=..")
-                    grandparent_element = parent_element.query_selector(":scope >> xpath=..")
-                    sibling_element = grandparent_element.query_selector(":scope >> xpath=following-sibling::*[1]")
-                    url = sibling_element.get_attribute('href')
-                    urls.append(url)
-
-                logging.info(f"Scraped URLs: {urls}")
-
-                for url in urls:
-                    # Prepend 'https://crex.live' to the URL
-                    url = 'https://crex.live' + url
-                # Find changes - first, before updating state 
-                previous_urls = load_previous_urls()
-                added_urls, deleted_urls = get_changes(urls)    
-                # Treat all as added on the first run 
-                if not previous_urls:   # Check if there were no previous URLs
-                    added_urls = urls
-                    deleted_urls = []
-                # Now, update the database state    
-                store_urls(urls)
-                 
-                if added_urls or deleted_urls:
-                    # Send the URLs to your Spring Boot app
-                    # fetch the bearer token from cricket-data-service
-                    # start scraping if url is added 
-                        # Start scraping if url is added
-                        token = cricket_data_service.get_bearer_token()
-                        cricket_data_service.add_live_matches(urls, token)
-                        
-                        if added_urls:
-                            for url in added_urls:
-                                # append https://crex.live to the url
-                                url = 'https://crex.live' + url
-                                response = requests.post('http://localhost:5000/start-scrape', json={'url': url})
-                            if response.status_code == 200:
-                                logging.info(f"Scraping started for url from scrape function: {url}")
-                            else:
-                                logging.error(f"Failed to start scraping for url: {url}")
-                                # try scraping for other urls if one fails
-                                
-                        """ if deleted_urls:
-                            for url in deleted_urls:
-                                url = 'https://crex.live' + url
-                                response = requests.post('http://localhost:5000/stop-scrape', json={'url': url})
-                            if response.status_code == 200:
-                                logging.info(f"Scraping stopped for url from scrape function: {url}")
-                            else:
-                                logging.error(f"Failed to stop scraping for url: {url}")   """      
-                                
-
-                # Consider updating to reflect actual scraping state
-                return {'status': 'Scraping finished', 'match_urls': urls}
-            except NetworkError as ne:
-                logging.error(f"Network error occurred: {ne}")
-                raise ne
-            except DOMChangeError as de:
-                logging.error(f"DOM change error occurred: {de}")
-                raise de
-            except Exception as e:
-                logging.error(f"Error during navigation: {e}")
-                raise ScrapeError(f"Error during navigation: {e}")
-
-        except Exception as e:
-            logging.error(f"Uncaught error: {e}")
-            raise ScrapeError(f"Uncaught error: {e}")
+                """ if deleted_urls:
+                    for url in deleted_urls:
+                        url = 'https://crex.live' + url
+                        response = requests.post('http://localhost:5000/stop-scrape', json={'url': url})
+                    if response.status_code == 200:
+                        logging.info(f"Scraping stopped for url from scrape function: {url}")
+                    else:
+                        logging.error(f"Failed to stop scraping for url: {url}")   """
+                # if deleted url check for these urls are deleted 3 times by maintaining count in the next loops
+                               
+        time.sleep(60)                
+        # Consider updating to reflect actual scraping state
+        return {'status': 'Scraping finished', 'match_urls': urls}
+    except NetworkError as ne:
+        logging.error(f"Network error occurred: {ne}")
+        raise ne
+    except DOMChangeError as de:
+        logging.error(f"DOM change error occurred: {de}")
+        raise de
+    except Exception as e:
+        logging.error(f"Error during navigation: {e}")
+        raise ScrapeError(f"Error during navigation: {e}")
 
 
 @app.route('/scrape-live-matches-link', methods=['GET'])
