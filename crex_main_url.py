@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 
 # Configure logging
-logging.basicConfig(filename='app.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename='crex_scraper.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class ScrapeError(Exception):
     pass
@@ -28,40 +28,64 @@ DB_FILE = 'url_state.db'
 
 def initialize_database():
     """Creates database and table if they don't exist."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-     # Create the table with the necessary columns upfront if possible
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS scraped_urls (
-            url TEXT PRIMARY KEY,
-            deletion_attempts INTEGER DEFAULT 0
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    logging.info("Initializing database")
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scraped_urls (
+                url TEXT PRIMARY KEY,
+                deletion_attempts INTEGER DEFAULT 0
+            )
+        ''')
+        cursor.execute('DELETE FROM scraped_urls')
+        conn.commit()
+        logging.info("All URLs removed from the table")
+        logging.info("Database initialized successfully")
+    except Exception as e:
+        logging.error(f"Error initializing database: {e}")
+    finally:
+        conn.close()
 
 def store_urls(urls):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.executemany("INSERT INTO scraped_urls (url, deletion_attempts) VALUES (?, 0) ON CONFLICT(url) DO UPDATE SET deletion_attempts = 0", [(url,) for url in urls])
-    conn.commit()
-    conn.close()
+    logging.info(f"Storing URLs: {urls}")
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.executemany("INSERT INTO scraped_urls (url, deletion_attempts) VALUES (?, 0) ON CONFLICT(url) DO UPDATE SET deletion_attempts = 0", [(url,) for url in urls])
+        conn.commit()
+        logging.info("URLs stored successfully")
+    except Exception as e:
+        logging.error(f"Error storing URLs: {e}")
+    finally:
+        conn.close()
+    
 
 def load_previous_urls():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT url FROM scraped_urls")
-    results = cursor.fetchall()
-    conn.close()
-    return [row[0] for row in results]
+    logging.info("Loading previous URLs")
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT url FROM scraped_urls")
+        results = cursor.fetchall()
+        logging.info(f"Previous URLs loaded: {results}")
+        return [row[0] for row in results]
+    except Exception as e:
+        logging.error(f"Error loading previous URLs: {e}")
+        return []
+    finally:
+        conn.close()
 
 def get_changes(new_urls):
+    logging.info(f"Calculating changes for new URLs: {new_urls}")
     previous_urls = load_previous_urls()
     added_urls = set(new_urls) - set(previous_urls)
     deleted_urls = set(previous_urls) - set(new_urls)
+    logging.info(f"Added URLs: {added_urls}, Deleted URLs: {deleted_urls}")
     return added_urls, deleted_urls
 
 def job():
+    logging.info("Starting job")
     url = "https://crex.live"
     with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -77,7 +101,7 @@ def job():
                     logging.error(f"Error in periodic task: {e}")
                     
 def scrape(page , url):
-    
+    logging.info(f"Scraping URL: {url}")
     try:
         page.goto(url)
         # wait for 10 seconds before clicking on the button
@@ -122,13 +146,14 @@ def scrape(page , url):
                 
                 
                 if added_urls:
+                    logging.info(f"Added URLs detected: {added_urls}")
                     token = cricket_data_service.get_bearer_token()
                     cricket_data_service.add_live_matches(urls, token)
                     
                     for url in added_urls:
                         # append https://crex.live to the url
                         url = 'https://crex.live' + url
-                        response = requests.post('http://localhost:5000/start-scrape', json={'url': url})
+                        response = requests.post('http://127.0.0.1:5000/start-scrape', json={'url': url})
                     if response.status_code == 200:
                         logging.info(f"Scraping started for url from scrape function: {url}")
                     else:
@@ -142,7 +167,7 @@ def scrape(page , url):
                 """ if deleted_urls:
                     for url in deleted_urls:
                         url = 'https://crex.live' + url
-                        response = requests.post('http://localhost:5000/stop-scrape', json={'url': url})
+                        response = requests.post('http://127.0.0.1:5000/stop-scrape', json={'url': url})
                     if response.status_code == 200:
                         logging.info(f"Scraping stopped for url from scrape function: {url}")
                     else:
@@ -166,7 +191,7 @@ def scrape(page , url):
 @app.route('/scrape-live-matches-link', methods=['GET'])
 def scrape_live_matches():
     try:
-
+        logging.info("Received request to scrape live matches")
         # Background scraping thread to prevent API blocking
         scraping_thread = threading.Thread(target=job)
         scraping_thread.daemon = True  # Mark as daemon thread
@@ -184,6 +209,7 @@ def scrape_live_matches():
 def start_scrape():
     url = request.json.get('url')
     if url:
+        logging.info(f"Received request to start scraping for URL: {url}")
         thread = threading.Thread(target=fetchData, args=(url,))
         scraping_tasks[url] = {'thread': thread, 'status': 'running'}
         thread.start()  # Start the thread
@@ -196,6 +222,7 @@ def start_scrape():
 def stop_scrape():
     url = request.json.get('url')
     if url:
+        logging.info(f"Received request to stop scraping for URL: {url}")
         if url in scraping_tasks:
             task_data = scraping_tasks.get(url)
             if task_data:

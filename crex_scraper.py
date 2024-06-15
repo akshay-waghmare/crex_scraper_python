@@ -7,7 +7,7 @@ import logging
 from shared import scraping_tasks 
 import threading
 
-logging.basicConfig(filename='crex_scraper.log', level=logging.INFO, format='%(asctime)s %(message)s')
+logging.basicConfig(filename='crex_scraper.log', level=logging.DEBUG, format='%(asctime)s %(message)s')
 
 # Function to print updated text
 def printUpdatedText(updatedTexts, token, url):
@@ -32,24 +32,33 @@ def fetchData(url):
     Returns:
         None
     """
+    logging.info(f"Starting fetchData for URL: {url}")
     with sync_playwright() as p:
         try:
-            browser = p.chromium.launch(headless=True)
+            logging.info("Launching browser")
+            browser = p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-dev-shm-usage'])
+            logging.info("Browser launched successfully")
             context = browser.new_context()
             page = context.new_page()
+            logging.info("Browser context and page created")
 
             # Get the token before entering the observation loop
             token = cricket_data_service.get_bearer_token()
+            logging.info(f"Bearer token obtained: {token}")
             
             # Add a listener for page errors
             page.on('error', lambda error: logging.error(f"Uncaught error: {error.name}: {error.message}"))
 
+            isButtonFoundFlag = False  # Initialize here
             try:
-                page.goto(url)
+                logging.info(f"Navigating to URL: {url}")
+                page.goto(url, timeout=60000)
                 # here I want to wait for 30 seconds before clicking on the button
                 # Wait for the oddsViewButton to be available
-                isButtonFoundFlag = False
                 isButtonFoundFlag = search_and_click_odds_button(page)
+                logging.info(f"Button found: {isButtonFoundFlag}")
             except Exception as e:
                 logging.error(f"Error during navigation: {e}")
 
@@ -83,6 +92,7 @@ def search_and_click_odds_button(page):
                 oddsViewButton.click();
             }
         ''')
+        logging.info("Clicked on the Odds View button")
         return True
     except Exception as e:
         logging.error(f"Odds View button not found within the specified timeout period: {e}")
@@ -99,6 +109,7 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
     Returns:
         None
     """
+    logging.info("Starting observation of text changes")
     try:
         running = True
         previousTexts = set()
@@ -123,7 +134,7 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                         return Array.from(spans).map(span => span.textContent.trim());
                     }
                 ''')
-                
+                logging.info(f"Updated texts: {updatedTexts}")
                 # Extract CRR
                 crr = page.evaluate('''
                     () => {
@@ -158,6 +169,7 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                         });
                     }
                 ''')
+                logging.info(f"Score: {score}")
                 # Bundle the data together
                  # Use page.evaluate() to execute JavaScript within the page context
                 overs_data = page.evaluate('''() => {
@@ -175,7 +187,7 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                     });
                     return overs;
                 }''')
-
+                logging.info(f"Overs data: {overs_data}")
                 # Print extracted data
                 for over in overs_data:
                     logging.info(f"{over['overNumber']}: {' '.join(over['balls'])} (Total: {over['totalRuns']})")
@@ -212,6 +224,7 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                     ''')
                     # Compare data to previous data and if not the same then print
                     if data != previousData:
+                        logging.info(f"Odds data changed: {data}")
                         logging.info(data)
                         #convert this data to dictionary before sending 
                         cricket_data_service.send_cricket_data_to_service(data, token,url)
@@ -257,8 +270,8 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
 
                         # Compare data to previous data and if not the same then print
                         if data != previousData:
+                            logging.info(f"Odds data changed: {data}")
                             logging.info("here I want to check why it is not sendign ")
-                            logging.info(data)
                             cricket_data_service.send_cricket_data_to_service(data, token,url)
                             previousData = data
 
@@ -267,6 +280,7 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                         
                 # Only print if the text content has changed
                 if set(updatedTexts) != previousTexts:
+                    logging.info(f"Text content changed: {updatedTexts}")
                     printUpdatedText(updatedTexts,token,url)
                     previousTexts = set(updatedTexts)
 
