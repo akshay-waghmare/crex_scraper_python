@@ -6,6 +6,7 @@ import json
 import logging
 from shared import scraping_tasks 
 import threading
+import time
 
 logging.basicConfig(filename='crex_scraper.log', level=logging.DEBUG, format='%(asctime)s %(message)s')
 
@@ -109,13 +110,24 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
     Returns:
         None
     """
+    
     logging.info("Starting observation of text changes")
+
     try:
         running = True
         previousTexts = set()
         previousData = []
         previousScore = []
         while running:
+            current_time = time.time()
+
+            # Check if refresh interval has passed
+            logging.info("Refreshing the page to prevent data from getting stuck")
+            page.reload()  # Reload the page
+            page.wait_for_load_state('load', timeout=2000)  # Shorten timeout to 2 seconds or less
+            logging.info("Page reloaded successfully")
+            last_refresh_time = current_time  # Reset the refresh timer
+                
             # Check if the task is marked for stopping
             if scraping_tasks.get(url, {}).get('status') == 'stopping':
                 logging.info(f'Stopping scraping task for url: {url}')
@@ -269,11 +281,10 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                         ''')
 
                         # Compare data to previous data and if not the same then print
-                        if data != previousData:
-                            logging.info(f"Odds data changed: {data}")
-                            logging.info("here I want to check why it is not sendign ")
-                            cricket_data_service.send_cricket_data_to_service(data, token,url)
-                            previousData = data
+                        logging.info(f"Odds data changed: {data}")
+                        logging.info("here I want to check why it is not sendign ")
+                        cricket_data_service.send_cricket_data_to_service(data, token,url)
+                        previousData = data
 
                     except Exception as e:
                         logging.error(f"Error during data evaluation: {e}")
