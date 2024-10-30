@@ -103,24 +103,122 @@ def extract_key_from_url(url):
     key = query_params.get('key', [None])[0]
     return key
 
+def extract_bowlers_stats_by_innings(response_json):
+    """
+    Extracts bowlers_stats from the 'a' attribute of each innings in the JSON response.
+
+    Args:
+        response_json (list): The JSON response as a list of dictionaries, each representing an inning.
+
+    Returns:
+        dict: A dictionary with innings labels as keys and their respective bowlers_stats as values.
+    """
+    innings_stats = {"innings": {}}
+
+    for idx, match_data in enumerate(response_json):
+        # Assign inning labels based on index
+        inning_label = (
+            f"{idx + 1}st_inning"
+            if idx == 0
+            else f"{idx + 1}nd_inning"
+            if idx == 1
+            else f"{idx + 1}th_inning"
+        )
+        bowlers_stats = {}
+        a_attribute = match_data.get("a", [])
+
+        for bowler_str in a_attribute:
+            bowler_code, stats = parse_bowler_string(bowler_str)
+            if bowler_code and stats:
+                bowlers_stats[bowler_code] = stats
+
+        innings_stats["innings"][inning_label] = {"bowlers_stats": bowlers_stats}
+
+    return innings_stats
+
+def parse_bowler_string(bowler_str):
+    """
+    Parses a bowler's performance string and returns a dictionary of stats.
+
+    Args:
+        bowler_str (str): The bowler performance string (e.g., "T8.35.24.0.2")
+
+    Returns:
+        tuple: (bowler_code, stats_dict) or (None, None) if parsing fails
+    """
+    try:
+        parts = bowler_str.split('.')
+        if len(parts) < 5:
+            print(f"Invalid bowler string format: {bowler_str}")
+            return None, None
+
+        bowler_code = parts[0]
+        balls_bowled = int(parts[1])
+        runs_conceded = int(parts[2])
+        maidens = int(parts[3])
+        wickets = int(parts[4])
+
+        # Calculate overs bowled
+        overs = balls_bowled // 6
+        balls = balls_bowled % 6
+        overs_decimal = overs + balls / 10  # Represent overs as decimal (e.g., 5 overs 5 balls → 5.5)
+
+        bowler_stats = {
+            "overs": overs_decimal,
+            "runs": runs_conceded,
+            "maidens": maidens,
+            "wickets": wickets
+        }
+
+        return bowler_code, bowler_stats
+    except Exception as e:
+        print(f"Error parsing bowler string '{bowler_str}': {e}")
+        return None, None
+
+
 def trigger_sC4_call(sc4_url, headers):
     """
-    Makes a GET request to sC4.php?key=RHO and logs the response.
-    
+    Makes a GET request to sC4.php with the provided key and headers,
+    extracts bowler statistics by innings using extract_bowlers_stats_by_innings,
+    logs the stats, and returns them for further processing.
+
     Args:
         sc4_url (str): The full URL for the sC4 API call.
         headers (dict): The headers to include in the request.
+
+    Returns:
+        dict: Extracted bowlers_stats organized by innings if successful, else None.
     """
     try:
         response = requests.get(sc4_url, headers=headers, timeout=10)
         if response.status_code == 200:
-            sc4_data = response.json()
-            api_logger.debug(f"sC4 Response Data: {sc4_data}")
-            # Further processing of sc4_data if needed
+            try:
+                sc4_data = response.json()
+                api_logger.debug(f"sC4 Response Data: {sc4_data}")
+
+                # Extract bowlers_stats by innings using the provided function
+                bowlers_stats_by_innings = extract_bowlers_stats_by_innings(sc4_data)
+
+                # Log the extracted bowlers_stats
+                api_logger.info(
+                    f"Extracted Bowlers Stats by Innings:{bowlers_stats_by_innings}"
+                )
+
+                return bowlers_stats_by_innings
+            except json.JSONDecodeError:
+                api_logger.error("Failed to decode JSON from sC4 response.")
+                return None
+            except Exception as e:
+                api_logger.error(f"Unexpected error while processing sC4 response: {e}")
+                return None
         else:
-            api_logger.error(f"Failed to fetch sC4 data. Status Code: {response.status_code}")
+            api_logger.error(
+                f"Failed to fetch sC4 data. Status Code: {response.status_code}"
+            )
+            return None
     except requests.RequestException as e:
         api_logger.error(f"Exception during sC4 API call: {e}")
+        return None
         
 def parse_batsman_stats(value):
     """
