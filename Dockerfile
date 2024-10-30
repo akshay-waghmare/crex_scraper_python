@@ -6,6 +6,8 @@ WORKDIR /app
 
 COPY . /app
 
+RUN chmod +x /app/start.sh
+
 # Expose the port Flask is running on
 EXPOSE 5000
 

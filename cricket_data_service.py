@@ -9,7 +9,7 @@ logging.basicConfig(filename='crex_scraper.log', level=logging.DEBUG, format='%(
 
 def get_bearer_token():
     # Define the URL of the token endpoint
-    token_url = os.getenv('TOKEN_URL', 'http://139.59.34.101:8099/token/generate-token')
+    token_url = os.getenv('TOKEN_URL', 'http://127.0.0.1:8099/token/generate-token')
 
 
     # Define the credentials required to obtain the token (if needed)
@@ -38,7 +38,7 @@ def get_bearer_token():
 
 def send_cricket_data_to_service(data, bearer_token,url):
     # Define the URL of the service where you want to send the data
-    service_url = os.getenv('SERVICE_URL', 'http://139.59.34.101:8099/cricket-data')
+    service_url = os.getenv('SERVICE_URL', 'http://127.0.0.1:8099/cricket-data')
 
     # Define the headers with the bearer token
     headers = {
@@ -78,9 +78,10 @@ def send_cricket_data_to_service(data, bearer_token,url):
     except Exception as e:
         logging.error(f"An error occurred while sending data: {str(e)}")
         
+        
 def add_live_matches(data, bearer_token):
     # Define the URL of the service where you want to send the data
-    service_url = os.getenv('ADD_LIVE_MATCHES_URL', 'http://139.59.34.101:8099/cricket-data/add-live-matches')
+    service_url = os.getenv('ADD_LIVE_MATCHES_URL', 'http://127.0.0.1:8099/cricket-data/add-live-matches')
     
     # Define the headers with the bearer token
     headers = {
@@ -102,4 +103,47 @@ def add_live_matches(data, bearer_token):
              logging.error(f"Failed to add live matches data. Status code: {response.status_code}")
     except Exception as e:
         logging.error(f"An error occurred while adding live matches data: {str(e)}")
+
+def send_data_to_api_endpoint(data, bearer_token, url, api_endpoint=None):
+    if api_endpoint is None:
+        api_endpoint = os.getenv('API_ENDPOINT', 'http://127.0.0.1:8099/cricket-data/match-info/save')
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {bearer_token}"
+    }
+
+    try:
+        logging.info("Preparing data to send to the API endpoint.")
+
+        if isinstance(data, dict):
+            json_payload = data.copy()
+            json_payload['url'] = url
+        else:
+            logging.error("Data should be a dictionary.")
+            return
+
+        # Serialize the payload to JSON string
+        try:
+            json_payload_str = json.dumps(json_payload)
+            logging.debug(f"Serialized JSON payload: {json_payload_str}")
+        except Exception as e:
+            logging.error(f"Error serializing json_payload: {e}")
+            return
+
+        logging.info(f"Sending data to API endpoint: {api_endpoint}")
+
+        # Send the POST request with the JSON string
+        response = requests.post(api_endpoint, headers=headers, data=json_payload_str)
+
+        if 200 <= response.status_code < 300:
+            logging.info("Data sent successfully to the API endpoint.")
+        else:
+            logging.error(f"Failed to send data. Status code: {response.status_code}")
+            logging.error(f"Response content: {response.text}")
+    except Exception as e:
+        logging.exception(f"An error occurred while sending data: {str(e)}")
+                
+        
+        
         

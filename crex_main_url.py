@@ -10,8 +10,6 @@ from crex_scraper import fetchData
 from shared import scraping_tasks
 app = Flask(__name__)
 
-
-
 # Configure logging
 logging.basicConfig(filename='crex_scraper.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -88,9 +86,13 @@ def job():
     logging.info("Starting job")
     url = "https://crex.live"
     with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context()
-            page = context.new_page()
+            browser = p.chromium.launch(
+            # user_data_dir="/tmp/playwright",  # Persistent context to reuse resources
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage']  # Reduce resource usage
+            )
+            #context = browser.new_context()
+            page = browser.new_page()
 
             while True:
                 try:
@@ -138,6 +140,9 @@ def scrape(page , url):
         # Now, update the database state    
         store_urls(urls)
         
+        token = cricket_data_service.get_bearer_token()        
+        cricket_data_service.add_live_matches(urls, token)
+        
         if added_urls or deleted_urls:
             # Send the URLs to your Spring Boot app
             # fetch the bearer token from cricket-data-service
@@ -147,8 +152,8 @@ def scrape(page , url):
                 
                 if added_urls:
                     logging.info(f"Added URLs detected: {added_urls}")
-                    token = cricket_data_service.get_bearer_token()
-                    cricket_data_service.add_live_matches(urls, token)
+                    """ token = cricket_data_service.get_bearer_token()
+                    cricket_data_service.add_live_matches(urls, token) """
                     
                     for url in added_urls:
                         # append https://crex.live to the url
@@ -160,10 +165,6 @@ def scrape(page , url):
                         logging.error(f"Failed to start scraping for url: {url}")
                         # try scraping for other urls if one fails
                 
-                if deleted_urls:
-                    token = cricket_data_service.get_bearer_token()
-                    cricket_data_service.add_live_matches(urls, token)
-
                 """ if deleted_urls:
                     for url in deleted_urls:
                         url = 'https://crex.live' + url
@@ -171,7 +172,7 @@ def scrape(page , url):
                     if response.status_code == 200:
                         logging.info(f"Scraping stopped for url from scrape function: {url}")
                     else:
-                        logging.error(f"Failed to stop scraping for url: {url}")   """
+                        logging.error(f"Failed to stop scraping for url: {url}") """
                 # if deleted url check for these urls are deleted 3 times by maintaining count in the next loops
                                
         time.sleep(60)                
@@ -207,6 +208,7 @@ def scrape_live_matches():
 
 @app.route('/start-scrape', methods=['POST'])
 def start_scrape():
+
     url = request.json.get('url')
     if url:
         logging.info(f"Received request to start scraping for URL: {url}")
@@ -214,10 +216,14 @@ def start_scrape():
         scraping_tasks[url] = {'thread': thread, 'status': 'running'}
         thread.start()  # Start the thread
         logging.info(f"Scraping started for url: {url}")
-        return jsonify({'status': 'Scraping started for url: ' + url})
+        response = jsonify({'status': 'Scraping started for url: ' + url})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response
     else:
-        return jsonify({'status': 'No url provided'}), 400
-
+        response = jsonify({'status': 'No url provided'}), 400
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response
+    
 @app.route('/stop-scrape', methods=['POST'])
 def stop_scrape():
     url = request.json.get('url')

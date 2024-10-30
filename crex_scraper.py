@@ -1,117 +1,539 @@
 import argparse
+import os
 import sys
+
+import requests
 import cricket_data_service
 from playwright.sync_api import sync_playwright
 import json
 import logging
 from shared import scraping_tasks 
-import threading
+from crex_info_url import scrape_match_info  # Import the modularized info scraper
 import time
+from urllib.parse import urlparse, parse_qs
 
-logging.basicConfig(filename='crex_scraper.log', level=logging.DEBUG, format='%(asctime)s %(message)s')
+# Initialize loggers
+api_logger = logging.getLogger('api_logger')
+api_logger.setLevel(logging.DEBUG)
+scraper_logger = logging.getLogger('scraper_logger')
+scraper_logger.setLevel(logging.WARN)
 
-# Function to print updated text
+# File handlers
+api_file_handler = logging.FileHandler('api.log',encoding='utf-8')
+scraper_file_handler = logging.FileHandler('crex_scraper.log',encoding='utf-8')
+
+# Console handler
+console_handler = logging.StreamHandler()
+api_file_handler.setLevel(logging.DEBUG)
+scraper_file_handler.setLevel(logging.WARN)
+console_handler.setLevel(logging.WARN)
+
+# Define log formats
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+api_file_handler.setFormatter(formatter)
+scraper_file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Add handlers to the loggers
+api_logger.addHandler(api_file_handler)
+api_logger.addHandler(console_handler)  # Console handler for debugging in real-time
+scraper_logger.addHandler(scraper_file_handler)
+scraper_logger.addHandler(console_handler)  # Console handler for real-time feedback
+
+def categorize_local_storage_data(page):
+    """
+    Extracts and categorizes local storage data into player, team, and series maps.
+    
+    Args:
+        page: The Playwright page object.
+    
+    Returns:
+        A dictionary containing player_data, team_data, and series_data.
+    """
+    try:
+        page.wait_for_load_state(state='domcontentloaded')
+        local_storage = page.evaluate("() => Object.fromEntries(Object.entries(localStorage).map(([k, v]) => [k, v]))")
+        scraper_logger.info("Successfully extracted local storage data.")
+
+        # Categorize data
+        player_data = {k: v for k, v in local_storage.items() if k.startswith('p_')}
+        team_data = {k: v for k, v in local_storage.items() if k.startswith('t_')}
+        series_data = {k: v for k, v in local_storage.items() if k.startswith('s_')}
+
+        scraper_logger.info(f"Player Data Map: {player_data}")
+        scraper_logger.info(f"Team Data Map: {team_data}")
+        scraper_logger.debug(f"Series Data Map: {series_data}")
+
+        return {'player_data': player_data, 'team_data': team_data, 'series_data': series_data}
+    except Exception as e:
+        scraper_logger.error(f"Error extracting or mapping local storage: {e}", exc_info=True)
+        return None
+
+def parse_runs_and_balls(value):
+    """
+    Parses the runs and balls faced from the given string.
+    
+    Args:
+        value (str): The string containing runs and balls information.
+    
+    Returns:
+        A tuple of (runs, balls_faced, on_strike).
+    """
+    if not value:
+        return 0, 0, False
+    on_strike = value.endswith('*')
+    value = value.replace('*', '')
+    parts = value.split('.')
+    runs = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 0
+    balls_faced = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    return runs, balls_faced, on_strike
+
+def extract_key_from_url(url):
+    """
+    Extracts the 'key' parameter from the given URL.
+    
+    Args:
+        url (str): The URL containing the 'key' parameter.
+    
+    Returns:
+        str: The value of the 'key' parameter, or None if not found.
+    """
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+    key = query_params.get('key', [None])[0]
+    return key
+
+def trigger_sC4_call(sc4_url, headers):
+    """
+    Makes a GET request to sC4.php?key=RHO and logs the response.
+    
+    Args:
+        sc4_url (str): The full URL for the sC4 API call.
+        headers (dict): The headers to include in the request.
+    """
+    try:
+        response = requests.get(sc4_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            sc4_data = response.json()
+            api_logger.debug(f"sC4 Response Data: {sc4_data}")
+            # Further processing of sc4_data if needed
+        else:
+            api_logger.error(f"Failed to fetch sC4 data. Status Code: {response.status_code}")
+    except requests.RequestException as e:
+        api_logger.error(f"Exception during sC4 API call: {e}")
+        
+def parse_batsman_stats(value):
+    """
+    Parses the batsman's stats (fours, sixes, and additional unknown stats).
+    
+    Args:
+        value (str): The string containing batsman's stats.
+    
+    Returns:
+        A tuple of (fours, sixes, additional_stats).
+    """
+    parts = value.split('.') if value else []
+    fours = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 0
+    sixes = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    additional_stats = {
+        'stat_3': parts[2] if len(parts) > 2 else 'Unknown',
+        'stat_4': parts[3] if len(parts) > 3 else 'Unknown'
+    }
+    return fours, sixes, additional_stats
+
+def handle_api_responses(response, data_store):
+    """
+    Intercepts API responses to extract current ball info, favorite team, and odds.
+    
+    Args:
+        response: The Playwright response object.
+        data_store (dict): The shared data storage for scraped data.
+    """
+    if "sV3.php" in response.url:
+        try:
+            api_data = response.json()
+            api_logger.debug(f"API data: {api_data}")  # Log the raw API data
+
+            # Extract 'B' (current ball info)
+            current_ball_info = api_data.get('B', 'No current ball info available')
+            data_store['current_ball_info'] = current_ball_info
+            api_logger.debug(f"Current Ball Info: {current_ball_info}")
+
+            # Extract 'F' (favorite team)
+            favorite_team_raw = api_data.get('F')
+            if favorite_team_raw:
+                favorite_team = favorite_team_raw.replace('^', "")
+                data_store['favorite_team'] = favorite_team
+                api_logger.debug(f"Extracted favorite team: {favorite_team}")
+            else:
+                favorite_team = 'Unknown Team'
+                data_store['favorite_team'] = favorite_team
+                api_logger.warning("Favorite team 'F' field is missing or empty in API response.")
+
+            # Extract 'R' (odds of the favorite team)
+            favorite_team_odds_raw = api_data.get('R')
+            if favorite_team_odds_raw:
+                favorite_team_odds = favorite_team_odds_raw
+                data_store['favorite_team_odds'] = favorite_team_odds
+                api_logger.debug(f"Extracted favorite team odds: {favorite_team_odds}")
+            else:
+                favorite_team_odds = '0+0'
+                data_store['favorite_team_odds'] = favorite_team_odds
+                api_logger.warning("Favorite team odds 'R' field is missing or empty in API response.")
+
+            # Extract session overs and odds
+            session_overs_raw = api_data.get('D')
+            session_odds_raw = api_data.get('Z')
+
+            api_logger.debug(f"Type of 'D': {type(session_overs_raw)}, Value: {session_overs_raw}")
+            api_logger.debug(f"Type of 'Z': {type(session_odds_raw)}, Value: {session_odds_raw}")
+
+            session_overs = str(session_overs_raw) if session_overs_raw is not None else ''
+            session_odds = str(session_odds_raw) if session_odds_raw is not None else ''
+
+            session_over_list = session_overs.split(',') if session_overs else []
+            session_odds_list = session_odds.split(',') if session_odds else []
+
+            session_data = []
+
+            for over, odds in zip(session_over_list, session_odds_list):
+                odds_parts = odds.split('+')
+                back_odds = odds_parts[0] if len(odds_parts) > 0 else '0'
+                lay_difference = odds_parts[1] if len(odds_parts) > 1 else '0'
+
+                try:
+                    lay_odds_value = int(back_odds) + int(lay_difference)
+                    lay_odds = str(lay_odds_value)
+                except ValueError:
+                    lay_odds = back_odds  # Default to back_odds if conversion fails
+
+                back_odds = '-' if back_odds == '0' else back_odds
+                lay_odds = '-' if lay_odds == '0' else lay_odds
+
+                session_data.append({
+                    'sessionName': over,
+                    'odds': [
+                        {'value': back_odds},
+                        {'value': lay_odds}
+                    ]
+                })
+
+            data_store['session_data'] = session_data
+            api_logger.debug(f"Session Data: {session_data}")
+
+            # Extract Players
+            p_field = api_data.get('p', '')
+            p_split = p_field.split('.') if p_field else []
+
+            batsman1_id = p_split[0] if len(p_split) > 0 else None
+            batsman2_id = p_split[1] if len(p_split) > 1 else None
+
+            # Batsman 1
+            q_value = api_data.get('q', '')               
+            batsman1_runs, batsman1_balls_faced, batsman1_on_strike = parse_runs_and_balls(q_value)
+
+            r_value = api_data.get('r', '')
+            batsman1_fours, batsman1_sixes, batsman1_additional_stats = parse_batsman_stats(r_value) 
+
+            batsman_1_stats = {
+                'name': batsman1_id,
+                'runs': batsman1_runs,
+                'balls_faced': batsman1_balls_faced,
+                'fours': batsman1_fours,
+                'sixes': batsman1_sixes,
+                'on_strike': batsman1_on_strike,
+                'additional_stats': batsman1_additional_stats
+            }
+            data_store['batsman_1_stats'] = batsman_1_stats
+            api_logger.debug(f"Batsman 1 Stats: {batsman_1_stats}")
+
+            # Batsman 2
+            s_value = api_data.get('s', '')
+            batsman2_runs, batsman2_balls_faced, batsman2_on_strike = parse_runs_and_balls(s_value)
+
+            t_value = api_data.get('t', '')
+            batsman2_fours, batsman2_sixes, batsman2_additional_stats = parse_batsman_stats(t_value)
+
+            batsman_2_stats = {
+                'name': batsman2_id,
+                'runs': batsman2_runs,
+                'balls_faced': batsman2_balls_faced,
+                'fours': batsman2_fours,
+                'sixes': batsman2_sixes,
+                'on_strike': batsman2_on_strike,
+                'additional_stats': batsman2_additional_stats
+            }
+            data_store['batsman_2_stats'] = batsman_2_stats
+            api_logger.debug(f"Batsman 2 Stats: {batsman_2_stats}")
+
+            # Bowler
+            bowler_id = api_data.get('b', '')
+
+            c_field = api_data.get('c', '')
+            bowler_stats_split = c_field.split('.') if c_field else []
+
+            bowler_stats = {
+                'name': bowler_id,
+                'runs_conceded': bowler_stats_split[0] if len(bowler_stats_split) > 0 and bowler_stats_split[0].isdigit() else 'Unknown',
+                'balls_bowled': bowler_stats_split[1] if len(bowler_stats_split) > 1 and bowler_stats_split[1].isdigit() else 'Unknown',
+                'wickets_taken': bowler_stats_split[2] if len(bowler_stats_split) > 2 and bowler_stats_split[2].isdigit() else 'Unknown',
+                'dot_balls': bowler_stats_split[3] if len(bowler_stats_split) > 3 and bowler_stats_split[3].isdigit() else 'Unknown'
+            }
+            data_store['bowler_stats'] = bowler_stats
+            api_logger.debug(f"Bowler Stats: {bowler_stats}")
+
+            # Log captured information
+            api_logger.debug(f"Current Ball Info: {current_ball_info}")
+            api_logger.debug(f"Favorite Team: {data_store.get('favorite_team', 'Unknown Team')}")
+            api_logger.debug(f"Favorite Team Odds: {data_store.get('favorite_team_odds', '0+0')}")
+            api_logger.debug(f"Session Data: {data_store.get('session_data', [])}")
+            api_logger.debug(f"batsman_1_stats Data: {data_store.get('batsman_1_stats', {})}")
+            api_logger.debug(f"batsman_2_stats Data: {data_store.get('batsman_2_stats', {})}")
+            api_logger.debug(f"bowler_stats Data: {data_store.get('bowler_stats', {})}")
+
+            # Retrieve and store local storage data if not already done
+            if not data_store.get('local_storage_data'):
+                try:
+                    if response.frame and response.frame.page:
+                        page = response.frame.page
+                        local_storage_data = categorize_local_storage_data(page)
+                        if local_storage_data:
+                            data_store['local_storage_data'] = local_storage_data
+                            api_logger.debug("Local storage data retrieved and stored in data_store.")
+                        else:
+                            data_store['local_storage_data'] = {}
+                            api_logger.warning("Local storage data could not be retrieved.")
+                    else:
+                        api_logger.warning("Response frame or page is None, cannot retrieve local storage data.")
+                        data_store['local_storage_data'] = {}
+                except Exception as e:
+                    api_logger.error(f"Error retrieving local storage data inside handle_api_responses: {e}")
+                    data_store['local_storage_data'] = {}
+                    
+            key_parameter = extract_key_from_url(response.url)
+            if not key_parameter:
+                api_logger.warning("key parameter 'key' not found in sV3 response.")
+            
+            sc4_url = f"https://api-v1.com/v10/sC4.php?key={key_parameter}"
+            api_logger.info(f"Triggering sC4 API call with URL: {sc4_url}")
+            
+            # Extract headers from the original sV3 request
+            request_headers = response.request.headers
+            filtered_headers = {
+                'accept': request_headers.get('accept', ''),
+                'authorization': request_headers.get('authorization', ''),
+                'referer': request_headers.get('referer', ''),
+                'sec-ch-ua': request_headers.get('sec-ch-ua', ''),
+                'sec-ch-ua-mobile': request_headers.get('sec-ch-ua-mobile', ''),
+                'sec-ch-ua-platform': request_headers.get('sec-ch-ua-platform', ''),
+                'user-agent': request_headers.get('user-agent', ''),
+            }
+            
+            api_logger.info(f"filtered_headers: {filtered_headers}") 
+            
+             # Make the sC4 API call
+            trigger_sC4_call(sc4_url, filtered_headers)
+
+            # Optionally, process the sC4_data if needed
+            # Example: store in data_store or send to backend
+            
+        except Exception as e:
+            api_logger.error(f"Error processing API response: {e}", exc_info=True)
+
+def block_unnecessary_resources(route, request):
+    """
+    Blocks unnecessary resources like images and fonts to optimize scraping performance.
+
+    Args:
+        route: The route object.
+        request: The request object.
+    """
+    resource_type = request.resource_type
+    url = request.url
+    if resource_type in ["image", "font"]:
+        # Uncomment the following line to log blocked resources
+        # scraper_logger.debug(f"Blocking resource: {url} ({resource_type})")
+        route.abort()
+    else:
+        route.continue_()
+
 def printUpdatedText(updatedTexts, token, url):
+    """
+    Sends updated text content to the backend.
+    
+    Args:
+        updatedTexts (list): List of updated text strings.
+        token (str): Bearer token for authentication.
+        url (str): The URL being observed.
+    """
     for text in updatedTexts:
         score_update = {'score_update': text}
         cricket_data_service.send_cricket_data_to_service(score_update, token, url)
-        logging.info(score_update)
-
-# Function to print back and lay odds
-def printOdds(backOdds, layOdds):
-    logging.info("back odds are: ", backOdds)
-    logging.info("lay odds are: ", layOdds)
-
+        scraper_logger.info(score_update)
 
 def fetchData(url):
     """
     Fetches data from a given URL using Playwright library.
-
+    
     Args:
         url (str): The URL to fetch data from.
-
+    
     Returns:
         None
     """
-    logging.info(f"Starting fetchData for URL: {url}")
+    scraper_logger.info(f"Starting fetchData for URL: {url}")
+    
+    # Create a new data store for this thread
+    data_store = {
+        'current_ball_info': 'No current ball info available',
+        'favorite_team': 'Unknown Team',
+        'favorite_team_odds': '0+0',
+        'session_data': [],
+        'batsman_1_stats': {},
+        'batsman_2_stats': {},
+        'bowler_stats': {},
+        # 'local_storage_data' will be added by handle_api_responses
+    }
+    
+    # Scrape match info before proceeding to live scraping
+    info_url = url.replace('/live', '/info')
+    scraper_logger.info(f"Fetching match info from URL: {info_url}")
+    
+    # Determine if the match is a test match
+    is_test_match = 'test' in url.lower()
+    scraper_logger.info(f"Is test match: {is_test_match}")
+    
+    # Scrape match info using the crex_info_url.py module
+    try:
+        match_info_json = scrape_match_info(info_url)
+        scraper_logger.info(f"Scraped match info: {match_info_json}")
+        
+        # Send match info to backend (once)
+        token = cricket_data_service.get_bearer_token()
+        endpoint_url = os.getenv('API_ENDPOINT', 'http://spring-security-jwt-app:8099/cricket-data/match-info/save')
+
+        cricket_data_service.send_data_to_api_endpoint(match_info_json, token, info_url, endpoint_url)
+    except Exception as e:
+        scraper_logger.error(f"Error scraping match info from {info_url}: {e}")
+    
     with sync_playwright() as p:
         try:
-            logging.info("Launching browser")
+            scraper_logger.info("Launching browser")
             browser = p.chromium.launch(
-                headless=True,
-                args=['--no-sandbox', '--disable-dev-shm-usage'])
-            logging.info("Browser launched successfully")
-            context = browser.new_context()
+                headless=True,  # Set to False if you want to see the browser
+                args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-first-run', '--disable-infobars']
+            )
+            scraper_logger.info("Browser launched successfully")
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+                extra_http_headers={
+                    'sec-ch-ua': '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+                    'sec-ch-ua-mobile': '?0',
+                    'sec-ch-ua-platform': '"Windows"',
+                }
+            )
             page = context.new_page()
-            logging.info("Browser context and page created")
+            page.route("**/*", block_unnecessary_resources)
 
-            # Get the token before entering the observation loop
-            token = cricket_data_service.get_bearer_token()
-            logging.info(f"Bearer token obtained: {token}")
-            
+            scraper_logger.info("Browser context and page created")
+
+
+            # Navigate to the page first to ensure it is loaded
+            scraper_logger.info(f"Navigating to URL: {url}")
+            page.goto(url, timeout=60000)
+            scraper_logger.info("Page loaded successfully")
+
+            # Attach API response listener to capture current ball info
+            page.on("response", lambda response: handle_api_responses(response, data_store))
+
             # Add a listener for page errors
-            page.on('error', lambda error: logging.error(f"Uncaught error: {error.name}: {error.message}"))
+            page.on('error', lambda error: scraper_logger.error(f"Uncaught error: {error.name}: {error.message}"))
+            
+            
+            # Get the token before entering the observation loop
+            if 'token' not in locals():
+                token = cricket_data_service.get_bearer_token()
+                scraper_logger.info(f"Bearer token obtained: {token}")
 
-            isButtonFoundFlag = False  # Initialize here
-            try:
-                logging.info(f"Navigating to URL: {url}")
-                page.goto(url, timeout=60000)
-                # here I want to wait for 30 seconds before clicking on the button
-                # Wait for the oddsViewButton to be available
-                isButtonFoundFlag = search_and_click_odds_button(page)
-                logging.info(f"Button found: {isButtonFoundFlag}")
-            except Exception as e:
-                logging.error(f"Error during navigation: {e}")
+            # Retry logic for finding and clicking the Odds View button only for test matches
+            isButtonFoundFlag = False
+            max_retries = 3  # Maximum number of retries
+            retry_count = 0
 
-            # Start the observation loop in the background
-            observeTextChanges(page , isButtonFoundFlag,token,url)
+            if is_test_match:
+                while retry_count < max_retries and not isButtonFoundFlag:
+                    try:
+                        scraper_logger.info(f"Attempting to find and click the Odds View button, attempt {retry_count + 1}")
+                        isButtonFoundFlag = search_and_click_odds_button(page)
+                        if isButtonFoundFlag:
+                            scraper_logger.info(f"Button found on attempt {retry_count + 1}")
+                        else:
+                            retry_count += 1
+                            scraper_logger.warning(f"Retrying... {retry_count}/{max_retries}")
+                            if retry_count >= max_retries:
+                                scraper_logger.info("Max retries exceeded, skipping odds fetching.")
+                    except Exception as e:
+                        scraper_logger.error(f"Error during navigation or odds button attempt: {e}")
+                        retry_count += 1
+            else:
+                scraper_logger.info("Not a test match, skipping Odds View button click.")
 
-            # Keep the main event loop running
-            page.wait_for_timeout(1e9)
+            # Start the observation loop in the main thread
+            observeTextChanges(page, isButtonFoundFlag, token, url, retry_count, max_retries, data_store, is_test_match)
 
         except Exception as e:
-            logging.error(f"Uncaught error: {e}")
+            scraper_logger.error(f"Uncaught error: {e}", exc_info=True)
+        finally:
+            browser.close()
+            scraper_logger.info("Browser closed.")
 
 def search_and_click_odds_button(page):
     """
     Searches for the "Odds View" button on the page and clicks on it.
-
+    
     Args:
-        page: The page object representing the web page.
-
+        page: The Playwright page object.
+    
     Returns:
         True if the button is found and clicked successfully, False otherwise.
     """
     try:
         # Wait for the "Odds View" button to appear in the DOM
-        page.wait_for_selector('.odds-view-btn .view:nth-child(2)', timeout=30000)
+        page.wait_for_selector('.odds-view-btn .view:nth-child(2)', timeout=3000)
         
         # Run JavaScript on the page to click on the "Odds View" button
         page.evaluate('''
             () => {
                 const oddsViewButton = document.querySelector('.odds-view-btn .view:nth-child(2)');
-                oddsViewButton.click();
+                if (oddsViewButton) {
+                    oddsViewButton.click();
+                }
             }
         ''')
-        logging.info("Clicked on the Odds View button")
+        scraper_logger.info("Clicked on the Odds View button")
         return True
     except Exception as e:
-        logging.error(f"Odds View button not found within the specified timeout period: {e}")
+        scraper_logger.error(f"Odds View button not found within the specified timeout period: {e}")
         return False
 
-def observeTextChanges(page , isButtonFoundFlag,token,url):
+def observeTextChanges(page, isButtonFoundFlag, token, url, retry_count, max_retries, data_store, is_test_match):
     """
-    Observes text changes on a web page and prints the updated texts and data.
-
+    Observes text changes on a web page and sends updated data to the backend.
+    
     Args:
-        page: The web page to observe.
-        isButtonFoundFlag: A flag indicating whether the button is found.
-
+        page: The Playwright page object.
+        isButtonFoundFlag (bool): Flag indicating if the Odds View button was found.
+        token (str): Bearer token for authentication.
+        url (str): The URL being observed.
+        retry_count (int): Current retry count for button clicks.
+        max_retries (int): Maximum number of retries allowed.
+        data_store (dict): Shared data storage for scraped data.
+        is_test_match (bool): Flag indicating if the match is a test match.
+    
     Returns:
         None
     """
-    
-    logging.info("Starting observation of text changes")
+    scraper_logger.info("Starting observation of text changes")
 
     try:
         running = True
@@ -119,25 +541,62 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
         previousData = []
         previousScore = []
         while running:
-            current_time = time.time()
-
-            # Check if refresh interval has passed
-            logging.info("Refreshing the page to prevent data from getting stuck")
-            page.reload()  # Reload the page
-            page.wait_for_load_state('load', timeout=2000)  # Shorten timeout to 2 seconds or less
-            logging.info("Page reloaded successfully")
-            last_refresh_time = current_time  # Reset the refresh timer
-                
             # Check if the task is marked for stopping
             if scraping_tasks.get(url, {}).get('status') == 'stopping':
-                logging.info(f'Stopping scraping task for url: {url}')
+                scraper_logger.info(f'Stopping scraping task for url: {url}')
                 running = False
-                break;
+                break
+
             try:
-                if not isButtonFoundFlag:
-                   logging.info("Buton not found, searching again") 
-                   isButtonFoundFlag = search_and_click_odds_button(page)
-                   logging.info(f"Button found: {isButtonFoundFlag}")
+                # Refresh local storage data
+                try:
+                    local_storage_data = categorize_local_storage_data(page)
+                    if local_storage_data:
+                        data_store['local_storage_data'] = local_storage_data
+                        scraper_logger.warning("Local storage data refreshed and stored in data_store.")
+                    else:
+                        data_store['local_storage_data'] = {}
+                        scraper_logger.warning("Local storage data could not be refreshed.")
+                except Exception as e:
+                    scraper_logger.error(f"Error refreshing local storage data in observeTextChanges: {e}")
+                    data_store['local_storage_data'] = {}
+                    
+                # Extract and send batsman and bowler data
+                try:
+                    batsman_1_stats = data_store.get('batsman_1_stats', {})
+                    batsman_2_stats = data_store.get('batsman_2_stats', {})
+                    bowler_stats = data_store.get('bowler_stats', {})
+
+                    scraper_logger.warning(f"Using API extracted batsman and bowler data: \nBatsman 1: {batsman_1_stats} \nBatsman 2: {batsman_2_stats} \nBowler: {bowler_stats}")
+                    scraper_logger.warning(f"All data from local storage: {json.dumps(data_store.get('local_storage_data', {}), indent=2)}")
+                    # Retrieve local storage data from data_store
+                    if data_store.get('local_storage_data'):
+                        scraper_logger.debug("Local storage data is available, attempting to retrieve team data...")
+                        player_data = data_store['local_storage_data'].get('player_data', {})
+                        scraper_logger.warning(f"Player data from local storage: {json.dumps(player_data, indent=2)}")
+                        scraper_logger.debug(f"Team data from local storage: {json.dumps(data_store['local_storage_data'].get('team_data', {}), indent=2)}")
+                        
+                        # Update batsman and bowler names from local storage values 
+                        batsman_1_stats['name'] = player_data.get(f"p_{batsman_1_stats.get('name', '')}_name", 'Unknown Batsman 1')
+                        batsman_2_stats['name'] = player_data.get(f"p_{batsman_2_stats.get('name', '')}_name", 'Unknown Batsman 2')
+                        bowler_stats['name'] = player_data.get(f"p_{bowler_stats.get('name', '')}_name", 'Unknown Bowler')
+
+                    # Prepare data to send to the backend
+                    batsman_and_bowler_data = {
+                        "batsman_data": [
+                            batsman_1_stats,  # Send batsman 1 data
+                            batsman_2_stats    # Send batsman 2 data
+                        ],
+                        "bowler_data": bowler_stats,  # Send bowler data
+                        "url": url
+                    }
+                    
+                    # Send batsman and bowler data
+                    cricket_data_service.send_cricket_data_to_service(batsman_and_bowler_data, token, url)
+                    scraper_logger.info(f"Batsman and Bowler data sent: {batsman_and_bowler_data}")
+
+                except Exception as e:
+                    scraper_logger.error(f"Error during batsman and bowler data extraction: {e}")   
 
                 # Evaluate JavaScript on the page to get updated texts
                 updatedTexts = page.evaluate('''
@@ -146,7 +605,8 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                         return Array.from(spans).map(span => span.textContent.trim());
                     }
                 ''')
-                logging.info(f"Updated texts: {updatedTexts}")
+                scraper_logger.debug(f"Updated texts: {updatedTexts}")
+                
                 # Extract CRR
                 crr = page.evaluate('''
                     () => {
@@ -154,7 +614,7 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                         return crrElement ? crrElement.textContent.trim() : 'CRR not found';
                     }
                 ''')
-                logging.info(f"CRR: {crr}")
+                scraper_logger.debug(f"CRR: {crr}")
                 
                 # Extract the "KAR need 277 runs to win" text
                 final_result_text = page.evaluate('''
@@ -163,16 +623,19 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                         return finalResultElement ? finalResultElement.textContent.trim() : 'Final result text not found';
                     }
                 ''')
-                logging.info(f"Final Result Text: {final_result_text}")
+                scraper_logger.debug(f"Final Result Text: {final_result_text}")
                 
+                # Extract Score
                 score = page.evaluate('''
                     () => {
                         const teamDivs = Array.from(document.querySelectorAll('.team-content'));
-                        const firstTeamDiv = teamDivs.length > 0 ? [teamDivs[0]] : [];
-                        return firstTeamDiv.map(div => {
-                            const teamName = div.querySelector('.team-name').textContent.trim();
-                            const score = div.querySelector('.runs span:nth-child(1)').textContent;
-                            const over = div.querySelector('.runs span:nth-child(2)').textContent;
+                        return teamDivs.map(div => {
+                            const teamNameElement = div.querySelector('.team-name');
+                            const runsElement = div.querySelector('.runs span:nth-child(1)');
+                            const overElement = div.querySelector('.runs span:nth-child(2)');
+                            const teamName = teamNameElement ? teamNameElement.textContent.trim() : 'Unknown Team';
+                            const score = runsElement ? runsElement.textContent : '0/0';
+                            const over = overElement ? overElement.textContent : '0.0';
                             return {
                                 teamName,
                                 score,
@@ -181,9 +644,9 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                         });
                     }
                 ''')
-                logging.info(f"Score: {score}")
-                # Bundle the data together
-                 # Use page.evaluate() to execute JavaScript within the page context
+                scraper_logger.debug(f"Score: {score}")
+
+                # Extract Overs Data
                 overs_data = page.evaluate('''() => {
                     const overs = [];
                     document.querySelectorAll('div#slideOver .overs-slide').forEach(overElement => {
@@ -199,11 +662,13 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                     });
                     return overs;
                 }''')
-                logging.info(f"Overs data: {overs_data}")
-                # Print extracted data
+                scraper_logger.debug(f"Overs data: {overs_data}")
+
+                # Log extracted data
                 for over in overs_data:
-                    logging.info(f"{over['overNumber']}: {' '.join(over['balls'])} (Total: {over['totalRuns']})")
-        
+                    scraper_logger.debug(f"{over['overNumber']}: {' '.join(over['balls'])} (Total: {over['totalRuns']})")
+
+                # Prepare match update data
                 data_to_send = {
                     "match_update": {
                         "score": score[0] if score else {},  # Send the first score object or an empty dict if no score
@@ -213,14 +678,16 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                     "overs_data": overs_data if overs_data else [],
                 }
                 if score != previousScore:
-                    logging.info(score[0])
+                    scraper_logger.info(f"Sending match update data: {data_to_send['match_update']}")
+                    cricket_data_service.send_cricket_data_to_service(data_to_send, token, url)
                     previousScore = score
-                    cricket_data_service.send_cricket_data_to_service(data_to_send, token , url)
-                
-                if isButtonFoundFlag and 'test' in page.url:
-                    logging.info("Button found, searching for odds in test for url: {url}")
-                    
-                    data =  page.evaluate('''
+
+                # Handle Odds Data for Test Matches
+                if isButtonFoundFlag and is_test_match:
+                    scraper_logger.info(f"Button found, searching for odds in test for url: {url}")
+
+                    # Extract odds data for test matches
+                    odds_data = page.evaluate('''
                         () => {
                             const teamDivs = Array.from(document.querySelectorAll('.fav-odd .d-flex'));
                             return teamDivs.map(div => {
@@ -234,82 +701,93 @@ def observeTextChanges(page , isButtonFoundFlag,token,url):
                             });
                         }
                     ''')
-                    # Compare data to previous data and if not the same then print
-                    if data != previousData:
-                        logging.info(f"Odds data changed: {data}")
-                        logging.info(data)
-                        #convert this data to dictionary before sending 
-                        cricket_data_service.send_cricket_data_to_service(data, token,url)
-                        previousData = data
-                
-                if isButtonFoundFlag and not 'test' in page.url:
-                    try:
-                        data =  page.evaluate('''
-                            () => {
-                                const teamDivs = Array.from(document.querySelectorAll('.fav-odd'));
-                                const firstTeamDiv = teamDivs.length > 0 ? [teamDivs[0]] : [];
-                                const sessionDiv = teamDivs.length == 2 ? [teamDivs[1]] : [];
-                                const firstTeamData = firstTeamDiv.map(div => {
-                                    const teamName = div.querySelector('.rate-team-full-name').textContent;
-                                    const odds = Array.from(div.querySelectorAll('.odd div')).map(div => div.textContent);
-                                    return {
-                                        teamName,
-                                        backOdds: odds[0],
-                                        layOdds: odds[1],
-                                    };
-                                });
-                                const sessionData = sessionDiv.length > 0 ? sessionDiv.map(div => {
-                                    const sessionName = div.querySelector('.fav').textContent;
-                                    const odds = Array.from(div.querySelectorAll('.yes-no-odds div')).map(div => {
-                                        const option = div.querySelector('span:first-child').textContent;
-                                        const value = div.querySelector('span:last-child').textContent.trim();
-                                        return {
-                                            option,
-                                            value,
-                                        };
-                                    });
-                                    return {
-                                        sessionName,
-                                        odds
-                                    };
-                                }) : [];
-                                return {
-                                    firstTeamData,
-                                    sessionData
-                                };
-                            }
-                        ''')
 
-                        # Compare data to previous data and if not the same then print
-                        logging.info(f"Odds data changed: {data}")
-                        logging.info("here I want to check why it is not sendign ")
-                        cricket_data_service.send_cricket_data_to_service(data, token,url)
-                        previousData = data
+                    # Compare data to previous data and if not the same then send
+                    if odds_data != previousData:
+                        scraper_logger.info(f"Odds data changed: {odds_data}")
+                        # Prepare and send odds data
+                        odds_payload = {
+                            "odds_data": odds_data,
+                            "url": url
+                        }
+                        cricket_data_service.send_cricket_data_to_service(odds_payload, token, url)
+                        previousData = odds_data
+
+                # Handle Odds Data for Non-Test Matches
+                if not is_test_match:
+                    try:
+                        # Prepare the data structure to match your previous format
+                        odds = data_store.get('favorite_team_odds', '0+0').split('+')  # Assuming odds are in the format 'X+Y'
+                        back_odds = odds[0] if len(odds) > 0 else '0'
+                        lay_odds = str(int(back_odds) + int(odds[1])) if len(odds) > 1 else back_odds
+                        
+                        # Fetch the favorite team name from local storage
+                        favorite_team = data_store.get('favorite_team', 'Unknown Team')
+                        scraper_logger.debug(f"Favorite team from data_store: {favorite_team}")
+
+                        if data_store.get('local_storage_data'):
+                            scraper_logger.debug("Local storage data is available, attempting to retrieve team data...")
+                            team_data = data_store['local_storage_data'].get('team_data', {})
+                            scraper_logger.debug(f"Team data from local storage: {json.dumps(team_data, indent=2)}")
+
+                            # First, try to get team name using team code (e.g., 'Y4')
+                            team_key_name = f't_{favorite_team}_name'
+                            teamNameFromLocalStorage = team_data.get(team_key_name)
+                            if teamNameFromLocalStorage:
+                                teamName = teamNameFromLocalStorage
+                                scraper_logger.info(f"Favorite team from local storage by code: {teamName}")
+                            else:
+                                # If not found by code, try to find by matching team name
+                                for key, value in team_data.items():
+                                    if key.endswith('_name') and value.strip().lower() == favorite_team.strip().lower():
+                                        teamName = value.strip()
+                                        scraper_logger.info(f"Favorite team found in team_data by name: {teamName}")
+                                        break
+                                else:
+                                    teamName = favorite_team
+                                    scraper_logger.warning(f"Favorite team '{favorite_team}' not found in team_data. Using code as team name.")
+                        else:
+                            scraper_logger.warning("Local storage data not available. Using team name from data_store.")  
+                            
+                        odds_payload = {
+                            'firstTeamData': [
+                                {
+                                    'teamName': teamName,  # Map the favorite team
+                                    'backOdds': back_odds,  # Use the first value for back odds
+                                    'layOdds': lay_odds  # Use the second value for lay odds
+                                }
+                            ],
+                            'sessionData': data_store.get('session_data', [])  # Leave this empty or add relevant data if available
+                        }
+                        
+                        # Log and send the API-fetched odds data
+                        scraper_logger.info(f"Sending formatted odds data: {odds_payload}")
+                        cricket_data_service.send_cricket_data_to_service(odds_payload, token, url)
 
                     except Exception as e:
-                        logging.error(f"Error during data evaluation: {e}")
-                        
+                        scraper_logger.error(f"Error during odds evaluation or sending: {e}")
+
                 # Only print if the text content has changed
                 if set(updatedTexts) != previousTexts:
-                    logging.info(f"Text content changed: {updatedTexts}")
-                    printUpdatedText(updatedTexts,token,url)
+                    scraper_logger.info(f"Text content changed: {updatedTexts}")
+                    printUpdatedText(updatedTexts, token, url)
                     previousTexts = set(updatedTexts)
 
             except Exception as e:
-                logging.error(f"Error during DOM manipulation: {e}")
+                scraper_logger.error(f"Error during DOM manipulation: {e}", exc_info=True)
 
-            # Check for keyboard interrupt
+            # Wait for 2.5 seconds before the next iteration
             try:
-                page.wait_for_timeout(2500)
+                time.sleep(2.5)
             except KeyboardInterrupt:
                 running = False
-                logging.info("Observation loop stopped.")
+                scraper_logger.info("Observation loop stopped by user.")
                 sys.exit(0)  # Exit the script with a status code of 0 (success)
 
     except Exception as e:
-        logging.error(f"Uncaught error: {e}")
+        scraper_logger.error(f"Uncaught error in observeTextChanges: {e}", exc_info=True)
 
-# Main function
+# Main function invocation
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fetch and observe data from a given URL.")
     parser.add_argument("url", type=str, help="The URL to observe")
