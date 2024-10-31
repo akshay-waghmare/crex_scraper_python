@@ -105,14 +105,14 @@ def extract_key_from_url(url):
 
 def extract_match_stats_by_innings(response_json):
     """
-    Extracts both bowlers_stats and batsman_stats from the 'a' and 'b' attributes
-    of each innings in the JSON response.
+    Extracts bowlers_stats, batsman_stats, innings team score, and team code from each innings in the JSON response.
 
     Args:
         response_json (list): The JSON response as a list of dictionaries, each representing an inning.
 
     Returns:
-        dict: A dictionary with innings labels as keys and their respective bowlers_stats and batsman_stats as values.
+        dict: A dictionary with innings labels as keys and their respective team_code, team_score,
+              bowlers_stats, and batsman_stats as values.
     """
     innings_stats = {"innings": {}}
 
@@ -129,23 +129,35 @@ def extract_match_stats_by_innings(response_json):
             suffix = "th"
         inning_label = f"{inning_number}{suffix}_inning"
 
-        # Extract bowlers_stats
+        # Extract team_code and team_score from fields 'c' and 'd'
+        team_code = match_data.get("c", "").strip()
+        team_score = match_data.get("d", "").strip()
+
+        # Log the extracted team information
+        api_logger.debug(f"Inning {inning_number}: Team Code = {team_code}, Team Score = {team_score}")
+
+        # Extract bowlers_stats from the 'a' attribute
         bowlers_stats = {}
         a_attribute = match_data.get("a", [])
         for bowler_str in a_attribute:
             bowler_code, stats = parse_bowler_string(bowler_str)
             if bowler_code and stats:
                 bowlers_stats[bowler_code] = stats
+                api_logger.debug(f"Inning {inning_number}: Bowler {bowler_code} stats = {stats}")
 
-        # Extract batsman_stats
+        # Extract batsman_stats from the 'b' attribute
         batsman_stats = {}
         b_attribute = match_data.get("b", [])
         for batsman_str in b_attribute:
             batsman_code, stats = parse_batsman_string(batsman_str)
             if batsman_code and stats:
                 batsman_stats[batsman_code] = stats
+                api_logger.debug(f"Inning {inning_number}: Batsman {batsman_code} stats = {stats}")
 
+        # Consolidate all extracted data for the current inning
         innings_stats["innings"][inning_label] = {
+            "team_code": team_code,
+            "team_score": team_score,
             "bowlers_stats": bowlers_stats,
             "batsman_stats": batsman_stats
         }
