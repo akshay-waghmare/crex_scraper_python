@@ -103,36 +103,52 @@ def extract_key_from_url(url):
     key = query_params.get('key', [None])[0]
     return key
 
-def extract_bowlers_stats_by_innings(response_json):
+def extract_match_stats_by_innings(response_json):
     """
-    Extracts bowlers_stats from the 'a' attribute of each innings in the JSON response.
+    Extracts both bowlers_stats and batsman_stats from the 'a' and 'b' attributes
+    of each innings in the JSON response.
 
     Args:
         response_json (list): The JSON response as a list of dictionaries, each representing an inning.
 
     Returns:
-        dict: A dictionary with innings labels as keys and their respective bowlers_stats as values.
+        dict: A dictionary with innings labels as keys and their respective bowlers_stats and batsman_stats as values.
     """
     innings_stats = {"innings": {}}
 
     for idx, match_data in enumerate(response_json):
-        # Assign inning labels based on index
-        inning_label = (
-            f"{idx + 1}st_inning"
-            if idx == 0
-            else f"{idx + 1}nd_inning"
-            if idx == 1
-            else f"{idx + 1}th_inning"
-        )
+        # Assign inning labels based on index with correct ordinal suffix
+        inning_number = idx + 1
+        if inning_number == 1:
+            suffix = "st"
+        elif inning_number == 2:
+            suffix = "nd"
+        elif inning_number == 3:
+            suffix = "rd"
+        else:
+            suffix = "th"
+        inning_label = f"{inning_number}{suffix}_inning"
+
+        # Extract bowlers_stats
         bowlers_stats = {}
         a_attribute = match_data.get("a", [])
-
         for bowler_str in a_attribute:
             bowler_code, stats = parse_bowler_string(bowler_str)
             if bowler_code and stats:
                 bowlers_stats[bowler_code] = stats
 
-        innings_stats["innings"][inning_label] = {"bowlers_stats": bowlers_stats}
+        # Extract batsman_stats
+        batsman_stats = {}
+        b_attribute = match_data.get("b", [])
+        for batsman_str in b_attribute:
+            batsman_code, stats = parse_batsman_string(batsman_str)
+            if batsman_code and stats:
+                batsman_stats[batsman_code] = stats
+
+        innings_stats["innings"][inning_label] = {
+            "bowlers_stats": bowlers_stats,
+            "batsman_stats": batsman_stats
+        }
 
     return innings_stats
 
@@ -175,7 +191,66 @@ def parse_bowler_string(bowler_str):
         print(f"Error parsing bowler string '{bowler_str}': {e}")
         return None, None
 
+def parse_batsman_string(batsman_str):
+    """
+    Parses a batsman's performance string and returns a dictionary of stats, including batting status.
 
+    Args:
+        batsman_str (str): The batsman performance string (e.g., "37X.44.39.7.0.66.86.2.PP.389/25.29-184.30/")
+
+    Returns:
+        tuple: (batsman_code, stats_dict) or (None, None) if parsing fails
+    """
+    try:
+        # Split by '/' to separate main data from other details
+        main_part = batsman_str.split('/')[0]  # e.g., "37X.44.39.7.0.66.86.2.PP.389"
+        parts = main_part.split('.')
+
+        batsman_code = parts[0] if len(parts) >= 1 else None
+
+        # Determine batting status based on the number of segments
+        if len(parts) == 1:
+            # Only batsman code present
+            status = "yet_to_bat"
+        elif len(parts) == 5:
+            # Batsman code followed by 4 statistics: Runs, Balls Faced, Fours, Sixes
+            status = "currently_batting"
+        elif len(parts) > 5:
+            # Batsman code followed by more than 4 statistics: Dismissed
+            status = "dismissed"
+        else:
+            # Undefined status for unexpected formats
+            status = "unknown"
+
+        # Parse common fields
+        runs = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        balls_faced = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        fours = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+        sixes = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+        dismissal_over = parts[5] if len(parts) > 5 else None
+        dismissal_runs_score = parts[6] if len(parts) > 6 else None
+        dismissal_code = parts[7] if len(parts) > 7 else None
+        bowler_code = parts[8] if len(parts) > 8 else None
+        player_caught = parts[9] if len(parts) > 9 else None  # Optional field
+
+        batsman_stats = {
+            "runs": runs,
+            "balls_faced": balls_faced,
+            "fours": fours,
+            "sixes": sixes,
+            "dismissal_over": dismissal_over,
+            "dismissal_runs_score": dismissal_runs_score,
+            "dismissal_code": dismissal_code,
+            "bowler_code": bowler_code,
+            "player_caught": player_caught,
+            "status": status  # Added status field
+        }
+
+        return batsman_code, batsman_stats
+    except Exception as e:
+        print(f"Error parsing batsman string '{batsman_str}': {e}")
+        return None, None
+    
 def trigger_sC4_call(sc4_url, headers):
     """
     Makes a GET request to sC4.php with the provided key and headers,
@@ -197,7 +272,7 @@ def trigger_sC4_call(sc4_url, headers):
                 api_logger.debug(f"sC4 Response Data: {sc4_data}")
 
                 # Extract bowlers_stats by innings using the provided function
-                bowlers_stats_by_innings = extract_bowlers_stats_by_innings(sc4_data)
+                bowlers_stats_by_innings = extract_match_stats_by_innings(sc4_data)
 
                 # Log the extracted bowlers_stats
                 api_logger.info(
