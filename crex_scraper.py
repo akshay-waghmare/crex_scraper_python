@@ -1,7 +1,11 @@
 import argparse
+import asyncio
+import functools
 import os
 import sys
 
+import concurrent.futures
+import threading
 import requests
 import cricket_data_service
 from playwright.sync_api import sync_playwright
@@ -39,6 +43,69 @@ api_logger.addHandler(api_file_handler)
 api_logger.addHandler(console_handler)  # Console handler for debugging in real-time
 scraper_logger.addHandler(scraper_file_handler)
 scraper_logger.addHandler(console_handler)  # Console handler for real-time feedback
+
+# Initialize a ThreadPoolExecutor with a suitable number of workers
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)  # Adjust as needed
+
+
+def get_team_name(team_code, team_data):
+    """
+    Replaces the team code with the actual team name using the team_data mapping.
+
+    Args:
+        team_code (str): The team code (e.g., "OT").
+        team_data (dict): The mapping of team codes to team names.
+
+    Returns:
+        str: The corresponding team name or the original code if not found.
+    """
+    team_key = f"t_{team_code}_name"
+    team_name = team_data.get(team_key)
+    if team_name:
+        return team_name
+    else:
+        # Attempt to find by matching team name (case-insensitive)
+        for key, value in team_data.items():
+            if (
+                key.endswith("_name")
+                and value.strip().lower() == team_code.strip().lower()
+            ):
+                return value.strip()
+        # If not found, return the original code with a warning
+        logging.warning(
+            f"Team code '{team_code}' not found in team_data. Using code as team name."
+        )
+        return team_code
+
+def get_player_name(player_code, player_data):
+    """
+    Replaces the player code with the actual player name using the player_data mapping.
+
+    Args:
+        player_code (str): The player code (e.g., "FMM").
+        player_data (dict): The mapping of player codes to player names.
+
+    Returns:
+        str: The corresponding player name or the original code if not found.
+    """
+    player_key = f"p_{player_code}_name"
+    player_name = player_data.get(player_key)
+    if player_name:
+        return player_name
+    else:
+        # Attempt to find by matching player name (case-insensitive)
+        for key, value in player_data.items():
+            if (
+                key.endswith("_name")
+                and value.strip().lower() == player_code.strip().lower()
+            ):
+                return value.strip()
+        # If not found, return the original code with a warning
+        logging.warning(
+            f"Player code '{player_code}' not found in player_data. Using code as player name."
+        )
+        return player_code
+
 
 def categorize_local_storage_data(page):
     """
@@ -181,8 +248,8 @@ def parse_bowler_string(bowler_str):
             return None, None
 
         bowler_code = parts[0]
-        balls_bowled = int(parts[1])
-        runs_conceded = int(parts[2])
+        runs_conceded = int(parts[1])
+        balls_bowled = int(parts[2])
         maidens = int(parts[3])
         wickets = int(parts[4])
 
@@ -262,7 +329,24 @@ def parse_batsman_string(batsman_str):
     except Exception as e:
         print(f"Error parsing batsman string '{batsman_str}': {e}")
         return None, None
+
+
+def trigger_sC4_call_async(sc4_url, headers, data_store):
+    """
+    Asynchronously executes the synchronous trigger_sC4_call function
+    using a ThreadPoolExecutor and attaches a callback to handle the result.
     
+    Args:
+        sc4_url (str): The full URL for the sC4 API call.
+        headers (dict): The headers to include in the request.
+        data_store (dict): The shared data storage for scraped data.
+    
+    Returns:
+        None
+    """
+    future = executor.submit(trigger_sC4_call, sc4_url, headers)
+    future.add_done_callback(functools.partial(handle_sC4_result, data_store=data_store))
+        
 def trigger_sC4_call(sc4_url, headers):
     """
     Makes a GET request to sC4.php with the provided key and headers,
@@ -326,6 +410,93 @@ def parse_batsman_stats(value):
     }
     return fours, sixes, additional_stats
 
+def handle_sC4_result(future, data_store):
+    """
+    Callback function to handle the result of trigger_sC4_call.
+    
+    Args:
+        future (concurrent.futures.Future): The future object representing the async call.
+        data_store (dict): The shared data storage for scraped data.
+    
+    Returns:
+        None
+    """
+    try:
+        with data_store['lock']:
+         match_stats_by_innings = future.result()
+         if match_stats_by_innings:
+            team_data = data_store.get('local_storage_data', {}).get('team_data', {})
+            player_data = data_store.get('local_storage_data', {}).get('player_data', {})
+            
+            for inning_label, inning_stats in match_stats_by_innings.get('innings', {}).items():
+                api_logger.debug(f"Processing {inning_label}: {inning_stats}")
+                
+                # Replace team_code
+                original_team_code = inning_stats.get('team_code')
+                if original_team_code:
+                    team_name = get_team_name(original_team_code, team_data)
+                    inning_stats['team_code'] = team_name
+                    api_logger.info(f"Replaced team_code '{original_team_code}' with '{team_name}' in {inning_label}")
+                
+                # Replace bowler_codes in bowlers_stats safely
+                bowlers_stats = inning_stats.get('bowlers_stats', {})
+                api_logger.debug(f"Original bowlers_stats: {bowlers_stats}")
+                for bowler_code in list(bowlers_stats.keys()):
+                    bowler_stats = bowlers_stats[bowler_code]
+                    player_name = get_player_name(bowler_code, player_data)
+                    bowlers_stats[player_name] = bowler_stats
+                    del bowlers_stats[bowler_code]
+                    api_logger.info(f"Replaced bowler_code '{bowler_code}' with '{player_name}' in {inning_label}")
+                api_logger.debug(f"Updated bowlers_stats: {bowlers_stats}")
+                
+                # Replace batsman_codes in batsman_stats safely
+                batsman_stats = inning_stats.get('batsman_stats', {})
+                api_logger.debug(f"Original batsman_stats: {batsman_stats}")
+                for batsman_code in list(batsman_stats.keys()):
+                    batsman = batsman_stats[batsman_code]
+                    player_name = get_player_name(batsman_code, player_data)
+                    batsman_stats[player_name] = batsman
+                    del batsman_stats[batsman_code]
+                    api_logger.info(f"Replaced batsman_code '{batsman_code}' with '{player_name}' in {inning_label}")
+                api_logger.debug(f"Updated batsman_stats: {batsman_stats}")
+                    
+            data_store['sC4_stats'] = match_stats_by_innings
+            api_logger.info("sC4 stats successfully retrieved and stored.")
+            
+            # Retrieve the bearer token
+            token = cricket_data_service.get_bearer_token()
+            if not token:
+                api_logger.error("Failed to obtain bearer token. Cannot send sC4 stats to backend.")
+                return    
+            
+            # Define the backend endpoint URL for sC4 stats
+            # It's good practice to define this in environment variables for flexibility
+            # sc4_endpoint_url = os.getenv('API_ENDPOINT_SC4', 'http://127.0.0.1:8099/cricket-data/sC4-stats/save')
+            sc4_endpoint_url = os.getenv('API_ENDPOINT_SC4', 'http://spring-security-jwt-app:8099/cricket-data/sC4-stats/save')
+
+            # Prepare the payload
+            sc4_payload = {
+                "match_stats_by_innings": match_stats_by_innings,
+                "url": data_store.get('url', 'Unknown URL')  # Include the URL for reference
+            }
+            
+            # Send the data to the backend
+            success = cricket_data_service.send_data_to_api_endpoint(
+                data=sc4_payload,
+                bearer_token=token,
+                url=data_store.get('url', 'Unknown URL'),  # Optional, depending on your backend requirements
+                api_endpoint=sc4_endpoint_url
+            )
+            
+            if success:
+                api_logger.info("sC4 stats successfully sent to the backend.")
+            else:
+                api_logger.error("Failed to send sC4 stats to the backend.")
+            
+    except Exception as e:
+        api_logger.error(f"Error handling sC4 call result: {e}")
+
+        
 def handle_api_responses(response, data_store):
     """
     Intercepts API responses to extract current ball info, favorite team, and odds.
@@ -339,191 +510,195 @@ def handle_api_responses(response, data_store):
             api_data = response.json()
             api_logger.debug(f"API data: {api_data}")  # Log the raw API data
 
-            # Extract 'B' (current ball info)
-            current_ball_info = api_data.get('B', 'No current ball info available')
-            data_store['current_ball_info'] = current_ball_info
-            api_logger.debug(f"Current Ball Info: {current_ball_info}")
+            with data_store['lock']:
+                # Extract 'B' (current ball info)
+                current_ball_info = api_data.get('B', 'No current ball info available')
+                data_store['current_ball_info'] = current_ball_info
+                api_logger.debug(f"Current Ball Info: {current_ball_info}")
 
-            # Extract 'F' (favorite team)
-            favorite_team_raw = api_data.get('F')
-            if favorite_team_raw:
-                favorite_team = favorite_team_raw.replace('^', "")
-                data_store['favorite_team'] = favorite_team
-                api_logger.debug(f"Extracted favorite team: {favorite_team}")
-            else:
-                favorite_team = 'Unknown Team'
-                data_store['favorite_team'] = favorite_team
-                api_logger.warning("Favorite team 'F' field is missing or empty in API response.")
+                # Extract 'F' (favorite team)
+                favorite_team_raw = api_data.get('F')
+                if favorite_team_raw:
+                    favorite_team = favorite_team_raw.replace('^', "")
+                    data_store['favorite_team'] = favorite_team
+                    api_logger.debug(f"Extracted favorite team: {favorite_team}")
+                else:
+                    favorite_team = 'Unknown Team'
+                    data_store['favorite_team'] = favorite_team
+                    api_logger.warning("Favorite team 'F' field is missing or empty in API response.")
 
-            # Extract 'R' (odds of the favorite team)
-            favorite_team_odds_raw = api_data.get('R')
-            if favorite_team_odds_raw:
-                favorite_team_odds = favorite_team_odds_raw
-                data_store['favorite_team_odds'] = favorite_team_odds
-                api_logger.debug(f"Extracted favorite team odds: {favorite_team_odds}")
-            else:
-                favorite_team_odds = '0+0'
-                data_store['favorite_team_odds'] = favorite_team_odds
-                api_logger.warning("Favorite team odds 'R' field is missing or empty in API response.")
+                # Extract 'R' (odds of the favorite team)
+                favorite_team_odds_raw = api_data.get('R')
+                if favorite_team_odds_raw:
+                    favorite_team_odds = favorite_team_odds_raw
+                    data_store['favorite_team_odds'] = favorite_team_odds
+                    api_logger.debug(f"Extracted favorite team odds: {favorite_team_odds}")
+                else:
+                    favorite_team_odds = '0+0'
+                    data_store['favorite_team_odds'] = favorite_team_odds
+                    api_logger.warning("Favorite team odds 'R' field is missing or empty in API response.")
 
-            # Extract session overs and odds
-            session_overs_raw = api_data.get('D')
-            session_odds_raw = api_data.get('Z')
+                # Extract session overs and odds
+                session_overs_raw = api_data.get('D')
+                session_odds_raw = api_data.get('Z')
 
-            api_logger.debug(f"Type of 'D': {type(session_overs_raw)}, Value: {session_overs_raw}")
-            api_logger.debug(f"Type of 'Z': {type(session_odds_raw)}, Value: {session_odds_raw}")
+                api_logger.debug(f"Type of 'D': {type(session_overs_raw)}, Value: {session_overs_raw}")
+                api_logger.debug(f"Type of 'Z': {type(session_odds_raw)}, Value: {session_odds_raw}")
 
-            session_overs = str(session_overs_raw) if session_overs_raw is not None else ''
-            session_odds = str(session_odds_raw) if session_odds_raw is not None else ''
+                session_overs = str(session_overs_raw) if session_overs_raw is not None else ''
+                session_odds = str(session_odds_raw) if session_odds_raw is not None else ''
 
-            session_over_list = session_overs.split(',') if session_overs else []
-            session_odds_list = session_odds.split(',') if session_odds else []
+                session_over_list = session_overs.split(',') if session_overs else []
+                session_odds_list = session_odds.split(',') if session_odds else []
 
-            session_data = []
+                session_data = []
 
-            for over, odds in zip(session_over_list, session_odds_list):
-                odds_parts = odds.split('+')
-                back_odds = odds_parts[0] if len(odds_parts) > 0 else '0'
-                lay_difference = odds_parts[1] if len(odds_parts) > 1 else '0'
+                for over, odds in zip(session_over_list, session_odds_list):
+                    odds_parts = odds.split('+')
+                    back_odds = odds_parts[0] if len(odds_parts) > 0 else '0'
+                    lay_difference = odds_parts[1] if len(odds_parts) > 1 else '0'
 
-                try:
-                    lay_odds_value = int(back_odds) + int(lay_difference)
-                    lay_odds = str(lay_odds_value)
-                except ValueError:
-                    lay_odds = back_odds  # Default to back_odds if conversion fails
+                    try:
+                        lay_odds_value = int(back_odds) + int(lay_difference)
+                        lay_odds = str(lay_odds_value)
+                    except ValueError:
+                        lay_odds = back_odds  # Default to back_odds if conversion fails
 
-                back_odds = '-' if back_odds == '0' else back_odds
-                lay_odds = '-' if lay_odds == '0' else lay_odds
+                    back_odds = '-' if back_odds == '0' else back_odds
+                    lay_odds = '-' if lay_odds == '0' else lay_odds
 
-                session_data.append({
-                    'sessionName': over,
-                    'odds': [
-                        {'value': back_odds},
-                        {'value': lay_odds}
-                    ]
-                })
+                    session_data.append({
+                        'sessionName': over,
+                        'odds': [
+                            {'value': back_odds},
+                            {'value': lay_odds}
+                        ]
+                    })
 
-            data_store['session_data'] = session_data
-            api_logger.debug(f"Session Data: {session_data}")
+                data_store['session_data'] = session_data
+                api_logger.debug(f"Session Data: {session_data}")
 
-            # Extract Players
-            p_field = api_data.get('p', '')
-            p_split = p_field.split('.') if p_field else []
+                # Extract Players
+                p_field = api_data.get('p', '')
+                p_split = p_field.split('.') if p_field else []
 
-            batsman1_id = p_split[0] if len(p_split) > 0 else None
-            batsman2_id = p_split[1] if len(p_split) > 1 else None
+                batsman1_id = p_split[0] if len(p_split) > 0 else None
+                batsman2_id = p_split[1] if len(p_split) > 1 else None
 
-            # Batsman 1
-            q_value = api_data.get('q', '')               
-            batsman1_runs, batsman1_balls_faced, batsman1_on_strike = parse_runs_and_balls(q_value)
+                # Batsman 1
+                q_value = api_data.get('q', '')               
+                batsman1_runs, batsman1_balls_faced, batsman1_on_strike = parse_runs_and_balls(q_value)
 
-            r_value = api_data.get('r', '')
-            batsman1_fours, batsman1_sixes, batsman1_additional_stats = parse_batsman_stats(r_value) 
+                r_value = api_data.get('r', '')
+                batsman1_fours, batsman1_sixes, batsman1_additional_stats = parse_batsman_stats(r_value) 
 
-            batsman_1_stats = {
-                'name': batsman1_id,
-                'runs': batsman1_runs,
-                'balls_faced': batsman1_balls_faced,
-                'fours': batsman1_fours,
-                'sixes': batsman1_sixes,
-                'on_strike': batsman1_on_strike,
-                'additional_stats': batsman1_additional_stats
-            }
-            data_store['batsman_1_stats'] = batsman_1_stats
-            api_logger.debug(f"Batsman 1 Stats: {batsman_1_stats}")
+                batsman_1_stats = {
+                    'name': batsman1_id,
+                    'runs': batsman1_runs,
+                    'balls_faced': batsman1_balls_faced,
+                    'fours': batsman1_fours,
+                    'sixes': batsman1_sixes,
+                    'on_strike': batsman1_on_strike,
+                    'additional_stats': batsman1_additional_stats
+                }
+                data_store['batsman_1_stats'] = batsman_1_stats
+                api_logger.debug(f"Batsman 1 Stats: {batsman_1_stats}")
 
-            # Batsman 2
-            s_value = api_data.get('s', '')
-            batsman2_runs, batsman2_balls_faced, batsman2_on_strike = parse_runs_and_balls(s_value)
+                # Batsman 2
+                s_value = api_data.get('s', '')
+                batsman2_runs, batsman2_balls_faced, batsman2_on_strike = parse_runs_and_balls(s_value)
 
-            t_value = api_data.get('t', '')
-            batsman2_fours, batsman2_sixes, batsman2_additional_stats = parse_batsman_stats(t_value)
+                t_value = api_data.get('t', '')
+                batsman2_fours, batsman2_sixes, batsman2_additional_stats = parse_batsman_stats(t_value)
 
-            batsman_2_stats = {
-                'name': batsman2_id,
-                'runs': batsman2_runs,
-                'balls_faced': batsman2_balls_faced,
-                'fours': batsman2_fours,
-                'sixes': batsman2_sixes,
-                'on_strike': batsman2_on_strike,
-                'additional_stats': batsman2_additional_stats
-            }
-            data_store['batsman_2_stats'] = batsman_2_stats
-            api_logger.debug(f"Batsman 2 Stats: {batsman_2_stats}")
+                batsman_2_stats = {
+                    'name': batsman2_id,
+                    'runs': batsman2_runs,
+                    'balls_faced': batsman2_balls_faced,
+                    'fours': batsman2_fours,
+                    'sixes': batsman2_sixes,
+                    'on_strike': batsman2_on_strike,
+                    'additional_stats': batsman2_additional_stats
+                }
+                data_store['batsman_2_stats'] = batsman_2_stats
+                api_logger.debug(f"Batsman 2 Stats: {batsman_2_stats}")
 
-            # Bowler
-            bowler_id = api_data.get('b', '')
+                # Bowler
+                bowler_id = api_data.get('b', '')
 
-            c_field = api_data.get('c', '')
-            bowler_stats_split = c_field.split('.') if c_field else []
+                c_field = api_data.get('c', '')
+                bowler_stats_split = c_field.split('.') if c_field else []
 
-            bowler_stats = {
-                'name': bowler_id,
-                'runs_conceded': bowler_stats_split[0] if len(bowler_stats_split) > 0 and bowler_stats_split[0].isdigit() else 'Unknown',
-                'balls_bowled': bowler_stats_split[1] if len(bowler_stats_split) > 1 and bowler_stats_split[1].isdigit() else 'Unknown',
-                'wickets_taken': bowler_stats_split[2] if len(bowler_stats_split) > 2 and bowler_stats_split[2].isdigit() else 'Unknown',
-                'dot_balls': bowler_stats_split[3] if len(bowler_stats_split) > 3 and bowler_stats_split[3].isdigit() else 'Unknown'
-            }
-            data_store['bowler_stats'] = bowler_stats
-            api_logger.debug(f"Bowler Stats: {bowler_stats}")
+                bowler_stats = {
+                    'name': bowler_id,
+                    'runs_conceded': bowler_stats_split[0] if len(bowler_stats_split) > 0 and bowler_stats_split[0].isdigit() else 'Unknown',
+                    'balls_bowled': bowler_stats_split[1] if len(bowler_stats_split) > 1 and bowler_stats_split[1].isdigit() else 'Unknown',
+                    'wickets_taken': bowler_stats_split[2] if len(bowler_stats_split) > 2 and bowler_stats_split[2].isdigit() else 'Unknown',
+                    'dot_balls': bowler_stats_split[3] if len(bowler_stats_split) > 3 and bowler_stats_split[3].isdigit() else 'Unknown'
+                }
+                data_store['bowler_stats'] = bowler_stats
+                api_logger.debug(f"Bowler Stats: {bowler_stats}")
 
-            # Log captured information
-            api_logger.debug(f"Current Ball Info: {current_ball_info}")
-            api_logger.debug(f"Favorite Team: {data_store.get('favorite_team', 'Unknown Team')}")
-            api_logger.debug(f"Favorite Team Odds: {data_store.get('favorite_team_odds', '0+0')}")
-            api_logger.debug(f"Session Data: {data_store.get('session_data', [])}")
-            api_logger.debug(f"batsman_1_stats Data: {data_store.get('batsman_1_stats', {})}")
-            api_logger.debug(f"batsman_2_stats Data: {data_store.get('batsman_2_stats', {})}")
-            api_logger.debug(f"bowler_stats Data: {data_store.get('bowler_stats', {})}")
+                # Log captured information
+                api_logger.debug(f"Current Ball Info: {current_ball_info}")
+                api_logger.debug(f"Favorite Team: {data_store.get('favorite_team', 'Unknown Team')}")
+                api_logger.debug(f"Favorite Team Odds: {data_store.get('favorite_team_odds', '0+0')}")
+                api_logger.debug(f"Session Data: {data_store.get('session_data', [])}")
+                api_logger.debug(f"batsman_1_stats Data: {data_store.get('batsman_1_stats', {})}")
+                api_logger.debug(f"batsman_2_stats Data: {data_store.get('batsman_2_stats', {})}")
+                api_logger.debug(f"bowler_stats Data: {data_store.get('bowler_stats', {})}")
 
-            # Retrieve and store local storage data if not already done
-            if not data_store.get('local_storage_data'):
-                try:
-                    if response.frame and response.frame.page:
-                        page = response.frame.page
-                        local_storage_data = categorize_local_storage_data(page)
-                        if local_storage_data:
-                            data_store['local_storage_data'] = local_storage_data
-                            api_logger.debug("Local storage data retrieved and stored in data_store.")
+                # Retrieve and store local storage data if not already done
+                if not data_store.get('local_storage_data'):
+                    try:
+                        if response.frame and response.frame.page:
+                            page = response.frame.page
+                            local_storage_data = categorize_local_storage_data(page)
+                            if local_storage_data:
+                                data_store['local_storage_data'] = local_storage_data
+                                api_logger.debug("Local storage data retrieved and stored in data_store.")
+                            else:
+                                data_store['local_storage_data'] = {}
+                                api_logger.warning("Local storage data could not be retrieved.")
                         else:
+                            api_logger.warning("Response frame or page is None, cannot retrieve local storage data.")
                             data_store['local_storage_data'] = {}
-                            api_logger.warning("Local storage data could not be retrieved.")
-                    else:
-                        api_logger.warning("Response frame or page is None, cannot retrieve local storage data.")
+                    except Exception as e:
+                        api_logger.error(f"Error retrieving local storage data inside handle_api_responses: {e}")
                         data_store['local_storage_data'] = {}
-                except Exception as e:
-                    api_logger.error(f"Error retrieving local storage data inside handle_api_responses: {e}")
-                    data_store['local_storage_data'] = {}
-                    
-            key_parameter = extract_key_from_url(response.url)
-            if not key_parameter:
-                api_logger.warning("key parameter 'key' not found in sV3 response.")
-            
-            sc4_url = f"https://api-v1.com/v10/sC4.php?key={key_parameter}"
-            api_logger.info(f"Triggering sC4 API call with URL: {sc4_url}")
-            
-            # Extract headers from the original sV3 request
-            request_headers = response.request.headers
-            filtered_headers = {
-                'accept': request_headers.get('accept', ''),
-                'authorization': request_headers.get('authorization', ''),
-                'referer': request_headers.get('referer', ''),
-                'sec-ch-ua': request_headers.get('sec-ch-ua', ''),
-                'sec-ch-ua-mobile': request_headers.get('sec-ch-ua-mobile', ''),
-                'sec-ch-ua-platform': request_headers.get('sec-ch-ua-platform', ''),
-                'user-agent': request_headers.get('user-agent', ''),
-            }
-            
-            api_logger.info(f"filtered_headers: {filtered_headers}") 
-            
-             # Make the sC4 API call
-            trigger_sC4_call(sc4_url, filtered_headers)
+                        
+                key_parameter = extract_key_from_url(response.url)
+                if not key_parameter:
+                    api_logger.warning("key parameter 'key' not found in sV3 response.")
+                
+                sc4_url = f"https://api-v1.com/v10/sC4.php?key={key_parameter}"
+                api_logger.info(f"Triggering sC4 API call with URL: {sc4_url}")
+                
+                # Extract headers from the original sV3 request
+                request_headers = response.request.headers
+                filtered_headers = {
+                    'accept': request_headers.get('accept', ''),
+                    'authorization': request_headers.get('authorization', ''),
+                    'referer': request_headers.get('referer', ''),
+                    'sec-ch-ua': request_headers.get('sec-ch-ua', ''),
+                    'sec-ch-ua-mobile': request_headers.get('sec-ch-ua-mobile', ''),
+                    'sec-ch-ua-platform': request_headers.get('sec-ch-ua-platform', ''),
+                    'user-agent': request_headers.get('user-agent', ''),
+                }
+                
+                api_logger.info(f"filtered_headers: {filtered_headers}") 
+                
+                # Make the sC4 API call asynchronously
+                # Uncomment the synchronous call if needed
+                # trigger_sC4_call(sc4_url, filtered_headers)
+                trigger_sC4_call_async(sc4_url, filtered_headers, data_store)
 
-            # Optionally, process the sC4_data if needed
-            # Example: store in data_store or send to backend
-            
+                # Optionally, process the sC4_data if needed
+                # Example: store in data_store or send to backend
+                
         except Exception as e:
             api_logger.error(f"Error processing API response: {e}", exc_info=True)
+
 
 def block_unnecessary_resources(route, request):
     """
@@ -577,6 +752,8 @@ def fetchData(url):
         'batsman_1_stats': {},
         'batsman_2_stats': {},
         'bowler_stats': {},
+        'url':url,
+        'lock': threading.Lock()  # Added lock        
         # 'local_storage_data' will be added by handle_api_responses
     }
     
@@ -596,6 +773,7 @@ def fetchData(url):
         # Send match info to backend (once)
         token = cricket_data_service.get_bearer_token()
         endpoint_url = os.getenv('API_ENDPOINT', 'http://spring-security-jwt-app:8099/cricket-data/match-info/save')
+        # endpoint_url = os.getenv('API_ENDPOINT', 'http://127.0.0.1:8099/cricket-data/match-info/save')
 
         cricket_data_service.send_data_to_api_endpoint(match_info_json, token, info_url, endpoint_url)
     except Exception as e:
@@ -622,7 +800,23 @@ def fetchData(url):
 
             scraper_logger.info("Browser context and page created")
 
-
+            # **Step 1: Open /scorecard in a new tab**
+            scorecard_url = url.replace('/live', '/scorecard')
+            scraper_logger.info(f"Opening scorecard URL in a new tab: {scorecard_url}")
+            scorecard_page = context.new_page()
+            scorecard_page.route("**/*", block_unnecessary_resources)
+            scorecard_page.goto(scorecard_url, timeout=60000)
+            scraper_logger.info("Scorecard page loaded successfully")
+            scraper_logger.info("Scorecard page fully loaded")
+            
+            # **Step 2: Extract cookies from the browser context**
+            cookies = context.cookies()
+            scraper_logger.debug(f"Extracted cookies: {cookies}")
+            
+            # Close the scorecard tab if it's no longer needed
+            scorecard_page.close()
+            scraper_logger.info("Scorecard tab closed")
+            
             # Navigate to the page first to ensure it is loaded
             scraper_logger.info(f"Navigating to URL: {url}")
             page.goto(url, timeout=60000)
@@ -671,6 +865,8 @@ def fetchData(url):
         finally:
             browser.close()
             scraper_logger.info("Browser closed.")
+            executor.shutdown(wait=True)
+            scraper_logger.info("ThreadPoolExecutor shutdown completed.")
 
 def search_and_click_odds_button(page):
     """
