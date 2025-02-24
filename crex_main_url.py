@@ -25,7 +25,7 @@ class DOMChangeError(ScrapeError):
 DB_FILE = 'url_state.db'
 
 def initialize_database():
-    """Creates database and table if they don't exist."""
+    """Creates database and tables if they don't exist."""
     logging.info("Initializing database")
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -37,6 +37,19 @@ def initialize_database():
             )
         ''')
         cursor.execute('DELETE FROM scraped_urls')
+        
+        # Add leads table creation
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS leads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_name TEXT NOT NULL,
+                website TEXT,
+                contact_email TEXT,
+                phone_number TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         conn.commit()
         logging.info("All URLs removed from the table")
         logging.info("Database initialized successfully")
@@ -254,6 +267,125 @@ def stop_scrape():
             return jsonify({'status': 'No scraping task found for url: ' + url}), 400
     else:
         return jsonify({'status': 'No url provided'}), 400
+
+@app.route("/add-lead", methods=["POST"])
+def add_lead():
+    try:
+        data = request.json
+        company_name = data.get("company_name")
+        website = data.get("website")
+        contact_email = data.get("contact_email", "")
+        phone_number = data.get("phone_number", "")
+        notes = data.get("notes", "")
+
+        if not company_name or not website:
+            return jsonify({"error": "Company name and website are required"}), 400
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO leads (company_name, website, contact_email, phone_number, notes) 
+            VALUES (?, ?, ?, ?, ?)""",
+            (company_name, website, contact_email, phone_number, notes))
+        conn.commit()
+        lead_id = cursor.lastrowid
+        conn.close()
+
+        logging.info(f"New lead added: {company_name}")
+        return jsonify({"message": "Lead added successfully", "lead_id": lead_id}), 201
+
+    except Exception as e:
+        logging.error(f"Error adding lead: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/view-leads", methods=["GET"])
+def view_leads():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, company_name, website, contact_email, phone_number, notes, created_at 
+            FROM leads 
+            ORDER BY created_at DESC""")
+        leads = cursor.fetchall()
+        conn.close()
+
+        lead_list = []
+        for lead in leads:
+            lead_list.append({
+                "id": lead[0],
+                "company_name": lead[1],
+                "website": lead[2],
+                "contact_email": lead[3],
+                "phone_number": lead[4],
+                "notes": lead[5],
+                "created_at": lead[6]
+            })
+
+        return jsonify({"leads": lead_list}), 200
+
+    except Exception as e:
+        logging.error(f"Error fetching leads: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/update-lead/<int:lead_id>", methods=["PUT"])
+def update_lead(lead_id):
+    try:
+        data = request.json
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        # Check if lead exists
+        cursor.execute("SELECT * FROM leads WHERE id = ?", (lead_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return jsonify({"error": "Lead not found"}), 404
+
+        # Update lead
+        update_fields = []
+        values = []
+        for field in ["company_name", "website", "contact_email", "phone_number", "notes"]:
+            if field in data:
+                update_fields.append(f"{field} = ?")
+                values.append(data[field])
+        
+        if update_fields:
+            values.append(lead_id)
+            query = f"UPDATE leads SET {', '.join(update_fields)} WHERE id = ?"
+            cursor.execute(query, values)
+            conn.commit()
+            
+        conn.close()
+        logging.info(f"Lead {lead_id} updated successfully")
+        return jsonify({"message": "Lead updated successfully"}), 200
+
+    except Exception as e:
+        logging.error(f"Error updating lead: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/delete-lead/<int:lead_id>", methods=["DELETE"])
+def delete_lead(lead_id):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        # Check if lead exists
+        cursor.execute("SELECT * FROM leads WHERE id = ?", (lead_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return jsonify({"error": "Lead not found"}), 404
+
+        # Delete lead
+        cursor.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
+        conn.commit()
+        conn.close()
+        
+        logging.info(f"Lead {lead_id} deleted successfully")
+        return jsonify({"message": "Lead deleted successfully"}), 200
+
+    except Exception as e:
+        logging.error(f"Error deleting lead: {e}")
+        return jsonify({"error": str(e)}), 500
     
 if __name__ == "__main__":
     initialize_database()
