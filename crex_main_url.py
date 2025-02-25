@@ -1,5 +1,6 @@
 import logging
 from flask import Flask, jsonify , request
+from flask_cors import CORS
 from playwright.sync_api import sync_playwright
 import requests
 import cricket_data_service
@@ -8,7 +9,15 @@ import time
 import sqlite3
 from crex_scraper import fetchData
 from shared import scraping_tasks
+
 app = Flask(__name__)
+CORS(app, resources={
+    r"/add-lead": {
+        "origins": "*",  # Allow all origins for testing
+        "methods": ["POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 
 # Configure logging
 logging.basicConfig(filename='crex_scraper.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -268,8 +277,16 @@ def stop_scrape():
     else:
         return jsonify({'status': 'No url provided'}), 400
 
-@app.route("/add-lead", methods=["POST"])
+@app.route("/add-lead", methods=["POST", "OPTIONS"])
 def add_lead():
+    # Handle preflight OPTIONS request
+    if request.method == "OPTIONS":
+        response = jsonify({"message": "OK"})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST')
+        return response
+
     try:
         data = request.json
         company_name = data.get("company_name")
@@ -292,7 +309,8 @@ def add_lead():
         conn.close()
 
         logging.info(f"New lead added: {company_name}")
-        return jsonify({"message": "Lead added successfully", "lead_id": lead_id}), 201
+        response = jsonify({"message": "Lead added successfully", "lead_id": lead_id})
+        return response, 201
 
     except Exception as e:
         logging.error(f"Error adding lead: {e}")
