@@ -1,5 +1,5 @@
 # Use the official Ubuntu image from the Docker Hub
-FROM my-scrapper-1:latest
+FROM macubex/crex-scrapper-2:latest
 
 # Set the working directory in the container
 WORKDIR /app
