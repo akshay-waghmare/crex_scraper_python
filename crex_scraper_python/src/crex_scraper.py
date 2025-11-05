@@ -90,3 +90,7 @@ def scrape(url):
     except Exception as e:
         logger.error("scrape.error", metadata={"error": str(e), "url": url})
         raise ScrapeError(f"Error during scraping: {e}")
+
+
+# Backward compatibility alias
+fetchData = scrape

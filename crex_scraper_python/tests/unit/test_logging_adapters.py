@@ -4,6 +4,7 @@ import json
 from io import StringIO
 
 import pytest
+import structlog
 
 from src.logging.adapters import (
     bind_correlation_id,
@@ -11,6 +12,22 @@ from src.logging.adapters import (
     configure_logging,
     get_logger,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_logging():
+    """Reset structlog configuration before each test."""
+    # Reset the global configuration flag
+    import src.logging.adapters as adapters_module
+    adapters_module._IS_CONFIGURED = False
+    
+    # Reset structlog's global state
+    structlog.reset_defaults()
+    
+    yield
+    
+    # Cleanup after test
+    clear_correlation_id()
 
 
 def test_configure_logging_produces_json():
@@ -45,8 +62,6 @@ def test_correlation_id_binding():
     log_entry = json.loads(output)
     
     assert log_entry["correlation_id"] == correlation_id
-    
-    clear_correlation_id()
 
 
 def test_metadata_captures_extra_fields():

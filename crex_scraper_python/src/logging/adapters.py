@@ -36,7 +36,12 @@ def configure_logging(
     resolved_level = _resolve_log_level(level)
     target_stream = stream if stream is not None else sys.stdout
 
-    logging.basicConfig(level=resolved_level, format="%(message)s", stream=target_stream)
+    # Use PrintLoggerFactory for tests (when stream is provided), stdlib for production
+    if stream is not None:
+        logger_factory = structlog.PrintLoggerFactory(file=target_stream)
+    else:
+        logging.basicConfig(level=resolved_level, format="%(message)s", stream=target_stream)
+        logger_factory = structlog.stdlib.LoggerFactory()
 
     processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
@@ -60,7 +65,7 @@ def configure_logging(
         processors=processors,
         context_class=dict,
         wrapper_class=structlog.make_filtering_bound_logger(resolved_level),
-        logger_factory=structlog.stdlib.LoggerFactory(),
+        logger_factory=logger_factory,
         cache_logger_on_first_use=True,
     )
 

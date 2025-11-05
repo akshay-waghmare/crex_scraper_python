@@ -3,12 +3,12 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from playwright.sync_api import sync_playwright
 import requests
-import cricket_data_service
+from src import cricket_data_service
 import threading
 import time
 import sqlite3
-from crex_scraper import fetchData
-from shared import scraping_tasks
+from src.crex_scraper import fetchData
+from src.shared import scraping_tasks
 from src.logging.adapters import configure_logging, get_logger, bind_correlation_id
 
 app = Flask(__name__)

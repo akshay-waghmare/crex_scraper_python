@@ -1,5 +1,9 @@
 # shared.py
 
+# Global dictionary to track scraping tasks
+scraping_tasks = {}
+
+
 def get_config_value(key, default=None):
     """Retrieve a configuration value by key, returning a default if not found."""
     import os
