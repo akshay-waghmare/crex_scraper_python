@@ -6,8 +6,12 @@ Startup script for the Cricket Scraper Service with structured logging.
 import sys
 import os
 
-# Add src directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add both current directory and parent directory to path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+
+sys.path.insert(0, current_dir)
+sys.path.insert(0, parent_dir)
 
 from src.crex_main_url import app, initialize_database
 
