@@ -3,7 +3,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from playwright.sync_api import sync_playwright
 import requests
-from src import cricket_data_service
+from src.cricket_data_service import CricketDataService
 import threading
 import time
 import sqlite3
@@ -155,19 +155,20 @@ def scrape(page, url):
             deleted_urls = []
         store_urls(urls)
         
-        token = cricket_data_service.get_bearer_token()        
-        cricket_data_service.add_live_matches(urls, token)
+        token = CricketDataService.get_bearer_token()        
+        CricketDataService.add_live_matches(urls, token)
         
         if added_urls or deleted_urls:
             if added_urls:
-                logging.info(f"Added URLs detected: {added_urls}")
+                logger.info("matches.new_detected", metadata={"count": len(added_urls), "urls": list(added_urls)})
                 for url in added_urls:
-                    url = 'https://crex.live' + url
-                    response = requests.post('http://127.0.0.1:5000/start-scrape', json={'url': url})
-                if response.status_code == 200:
-                    logging.info(f"Scraping started for url from scrape function: {url}")
-                else:
-                    logging.error(f"Failed to start scraping for url: {url}")
+                    full_url = 'https://crex.live' + url
+                    logger.info("matches.trigger_scrape", metadata={"url": full_url})
+                    response = requests.post('http://127.0.0.1:5000/start-scrape', json={'url': full_url})
+                    if response.status_code == 200:
+                        logger.info("matches.scrape_started", metadata={"url": full_url})
+                    else:
+                        logger.error("matches.scrape_failed", metadata={"url": full_url, "status_code": response.status_code})
                 
         time.sleep(60)                
         return {'status': 'Scraping finished', 'match_urls': urls}
