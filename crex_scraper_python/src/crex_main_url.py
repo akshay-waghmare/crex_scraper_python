@@ -200,21 +200,36 @@ def scrape_live_matches():
 
 @app.route('/start-scrape', methods=['POST'])
 def start_scrape():
-
     url = request.json.get('url')
-    if url:
-        logging.info(f"Received request to start scraping for URL: {url}")
-        thread = threading.Thread(target=fetchData, args=(url,))
-        scraping_tasks[url] = {'thread': thread, 'status': 'running'}
-        thread.start()
-        logging.info(f"Scraping started for url: {url}")
-        response = jsonify({'status': 'Scraping started for url: ' + url})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        return response
-    else:
+    
+    if not url:
+        logger.warning("scrape.request.no_url", metadata={"source": "start_scrape"})
         response = jsonify({'status': 'No url provided'}), 400
         response.headers.add('Access-Control-Allow-Origin', '*')
         return response
+    
+    # Bind correlation ID for this scraping job
+    correlation_id = bind_correlation_id()
+    logger.info("scrape.request.received", metadata={"url": url, "correlation_id": correlation_id})
+    
+    # Wrapper function to maintain correlation ID in thread
+    def scrape_with_context():
+        bind_correlation_id(correlation_id)
+        try:
+            fetchData(url)
+            logger.info("scrape.job.complete", metadata={"url": url})
+        except Exception as e:
+            logger.error("scrape.job.failed", metadata={"url": url, "error": str(e)})
+    
+    thread = threading.Thread(target=scrape_with_context)
+    scraping_tasks[url] = {'thread': thread, 'status': 'running'}
+    thread.start()
+    
+    logger.info("scrape.job.started", metadata={"url": url, "thread_id": str(thread.ident)})
+    
+    response = jsonify({'status': 'Scraping started for url: ' + url, 'correlation_id': correlation_id})
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    return response
     
 @app.route('/stop-scrape', methods=['POST'])
 def stop_scrape():
