@@ -163,12 +163,18 @@ def scrape(page, url):
             deleted_urls = []
         store_urls(urls)
         
-        # Optional: Send to backend Java service
+        # CRITICAL: Sync complete list of live matches with backend on EVERY scrape
+        # This allows backend to mark old/finished matches for deletion
         try:
-            token = CricketDataService.get_bearer_token()        
-            CricketDataService.add_live_matches(urls, token)
+            logger.info("backend.sync_live_matches.start", metadata={"url_count": len(urls)})
+            token = CricketDataService.get_bearer_token()
+            if token:
+                CricketDataService.add_live_matches(urls, token)
+                logger.info("backend.sync_live_matches.complete", metadata={"url_count": len(urls), "synced": True})
+            else:
+                logger.warning("backend.sync_live_matches.skipped", metadata={"reason": "No bearer token available"})
         except Exception as e:
-            logger.warning("backend.service.unavailable", metadata={"error": str(e), "message": "Backend service unavailable, continuing with local scraping"})
+            logger.warning("backend.sync_live_matches.error", metadata={"error": str(e), "message": "Backend sync failed, continuing with local scraping"})
         
         if added_urls or deleted_urls:
             if added_urls:
