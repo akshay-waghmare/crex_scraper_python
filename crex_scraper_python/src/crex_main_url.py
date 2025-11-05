@@ -115,7 +115,7 @@ def get_changes(new_urls):
 def job():
     correlation_id = bind_correlation_id()
     logger.info("job.start", metadata={"correlation_id": correlation_id, "message": "Starting scraping job"})
-    url = "https://crex.live"
+    url = "https://crex.com"
     with sync_playwright() as p:
             browser = p.chromium.launch(
             headless=True,
@@ -125,7 +125,7 @@ def job():
 
             while True:
                 try:
-                    url = "https://crex.live"
+                    url = "https://crex.com"
                     scrape(page, url)
                     time.sleep(60)
                 except Exception as e:
@@ -153,7 +153,7 @@ def scrape(page, url):
         logging.info(f"Scraped URLs: {urls}")
 
         for url in urls:
-            url = 'https://crex.live' + url
+            url = 'https://crex.com' + url
         previous_urls = load_previous_urls()
         added_urls, deleted_urls = get_changes(urls)    
         if not previous_urls:
@@ -172,7 +172,7 @@ def scrape(page, url):
             if added_urls:
                 logger.info("matches.new_detected", metadata={"count": len(added_urls), "urls": list(added_urls)})
                 for url in added_urls:
-                    full_url = 'https://crex.live' + url
+                    full_url = 'https://crex.com' + url
                     logger.info("matches.trigger_scrape", metadata={"url": full_url})
                     response = requests.post('http://127.0.0.1:5000/start-scrape', json={'url': full_url})
                     if response.status_code == 200:
