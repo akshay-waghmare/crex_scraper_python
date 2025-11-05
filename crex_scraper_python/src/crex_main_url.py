@@ -7,7 +7,12 @@ from src.cricket_data_service import CricketDataService
 import threading
 import time
 import sqlite3
-from src.crex_scraper import fetchData
+import sys
+import os
+
+# Add parent directory to path to import root-level crex_scraper
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from crex_scraper import fetchData as fetch_match_data  # The detailed match scraper
 from src.shared import scraping_tasks
 from src.logging.adapters import configure_logging, get_logger, bind_correlation_id
 
@@ -221,7 +226,7 @@ def start_scrape():
     def scrape_with_context():
         bind_correlation_id(correlation_id)
         try:
-            fetchData(url)
+            fetch_match_data(url)  # Use the detailed match scraper
             logger.info("scrape.job.complete", metadata={"url": url})
         except Exception as e:
             logger.error("scrape.job.failed", metadata={"url": url, "error": str(e)})
