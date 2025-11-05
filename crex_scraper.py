@@ -829,9 +829,13 @@ def fetchData(url):
                     scraper_logger.warning(f"Error closing scorecard tab: {e}")
             
             # Navigate to the page first to ensure it is loaded
-            scraper_logger.info(f"Navigating to URL: {url}")
-            page.goto(url, timeout=60000)
-            scraper_logger.info("Page loaded successfully")
+            scraper_logger.info(f"Navigating to live page URL: {url}")
+            try:
+                response = page.goto(url, timeout=45000, wait_until="domcontentloaded")
+                scraper_logger.info(f"Live page loaded successfully with status: {response.status if response else 'unknown'}")
+            except Exception as e:
+                scraper_logger.error(f"Failed to load live page {url}: {e}")
+                raise  # Re-raise to be caught by outer exception handler
 
             # Attach API response listener to capture current ball info
             page.on("response", lambda response: handle_api_responses(response, data_store))
