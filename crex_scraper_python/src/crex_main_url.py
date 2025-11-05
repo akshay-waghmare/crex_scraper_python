@@ -152,8 +152,10 @@ def scrape(page, url):
 
         logging.info(f"Scraped URLs: {urls}")
 
-        for url in urls:
-            url = 'https://crex.com' + url
+        # Convert relative URLs to absolute URLs
+        urls = ['https://crex.com' + url for url in urls]
+        logging.info(f"Full URLs: {urls}")
+        
         previous_urls = load_previous_urls()
         added_urls, deleted_urls = get_changes(urls)    
         if not previous_urls:
@@ -172,13 +174,13 @@ def scrape(page, url):
             if added_urls:
                 logger.info("matches.new_detected", metadata={"count": len(added_urls), "urls": list(added_urls)})
                 for url in added_urls:
-                    full_url = 'https://crex.com' + url
-                    logger.info("matches.trigger_scrape", metadata={"url": full_url})
-                    response = requests.post('http://127.0.0.1:5000/start-scrape', json={'url': full_url})
+                    # URL is already absolute (contains https://crex.com)
+                    logger.info("matches.trigger_scrape", metadata={"url": url})
+                    response = requests.post('http://127.0.0.1:5000/start-scrape', json={'url': url})
                     if response.status_code == 200:
-                        logger.info("matches.scrape_started", metadata={"url": full_url})
+                        logger.info("matches.scrape_started", metadata={"url": url})
                     else:
-                        logger.error("matches.scrape_failed", metadata={"url": full_url, "status_code": response.status_code})
+                        logger.error("matches.scrape_failed", metadata={"url": url, "status_code": response.status_code})
                 
         time.sleep(60)                
         return {'status': 'Scraping finished', 'match_urls': urls}
@@ -229,10 +231,16 @@ def start_scrape():
         try:
             fetch_match_data(url)  # Use the detailed match scraper
             logger.info("scrape.job.complete", metadata={"url": url})
+        except KeyboardInterrupt:
+            logger.warning("scrape.job.interrupted", metadata={"url": url})
         except Exception as e:
-            logger.error("scrape.job.failed", metadata={"url": url, "error": str(e)})
+            logger.error("scrape.job.failed", metadata={"url": url, "error": str(e), "error_type": type(e).__name__})
+        finally:
+            # Update task status
+            if url in scraping_tasks:
+                scraping_tasks[url]['status'] = 'stopped'
     
-    thread = threading.Thread(target=scrape_with_context)
+    thread = threading.Thread(target=scrape_with_context, daemon=True)
     scraping_tasks[url] = {'thread': thread, 'status': 'running'}
     thread.start()
     
