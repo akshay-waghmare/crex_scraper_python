@@ -11,7 +11,8 @@ import sys
 import os
 
 # Add parent directory to path to import root-level crex_scraper
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, parent_dir)
 from crex_scraper import fetchData as fetch_match_data  # The detailed match scraper
 from src.shared import scraping_tasks
 from src.logging.adapters import configure_logging, get_logger, bind_correlation_id
