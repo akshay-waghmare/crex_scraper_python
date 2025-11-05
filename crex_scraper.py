@@ -471,8 +471,8 @@ def handle_sC4_result(future, data_store):
             
             # Define the backend endpoint URL for sC4 stats
             # It's good practice to define this in environment variables for flexibility
-            # sc4_endpoint_url = os.getenv('API_ENDPOINT_SC4', 'http://127.0.0.1:8099/cricket-data/sC4-stats/save')
-            sc4_endpoint_url = os.getenv('API_ENDPOINT_SC4', 'http://spring-security-jwt-app:8099/cricket-data/sC4-stats/save')
+            sc4_endpoint_url = os.getenv('API_ENDPOINT_SC4', 'http://127.0.0.1:8099/cricket-data/sC4-stats/save')
+            #sc4_endpoint_url = os.getenv('API_ENDPOINT_SC4', 'http://spring-security-jwt-app:8099/cricket-data/sC4-stats/save')
 
             # Prepare the payload
             sc4_payload = {
@@ -772,8 +772,8 @@ def fetchData(url):
         
         # Send match info to backend (once)
         token = cricket_data_service.get_bearer_token()
-        endpoint_url = os.getenv('API_ENDPOINT', 'http://spring-security-jwt-app:8099/cricket-data/match-info/save')
-        # endpoint_url = os.getenv('API_ENDPOINT', 'http://127.0.0.1:8099/cricket-data/match-info/save')
+        # endpoint_url = os.getenv('API_ENDPOINT', 'http://spring-security-jwt-app:8099/cricket-data/match-info/save')
+        endpoint_url = os.getenv('API_ENDPOINT', 'http://127.0.0.1:8099/cricket-data/match-info/save')
 
         cricket_data_service.send_data_to_api_endpoint(match_info_json, token, info_url, endpoint_url)
     except Exception as e:
@@ -783,7 +783,7 @@ def fetchData(url):
         try:
             scraper_logger.info("Launching browser")
             browser = p.chromium.launch(
-                headless=True,  # Set to False if you want to see the browser
+                headless=False,  # Set to False if you want to see the browser
                 args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-first-run', '--disable-infobars']
             )
             scraper_logger.info("Browser launched successfully")
@@ -803,19 +803,30 @@ def fetchData(url):
             # **Step 1: Open /scorecard in a new tab**
             scorecard_url = url.replace('/live', '/scorecard')
             scraper_logger.info(f"Opening scorecard URL in a new tab: {scorecard_url}")
-            scorecard_page = context.new_page()
-            scorecard_page.route("**/*", block_unnecessary_resources)
-            scorecard_page.goto(scorecard_url, timeout=60000)
-            scraper_logger.info("Scorecard page loaded successfully")
-            scraper_logger.info("Scorecard page fully loaded")
+            
+            try:
+                scorecard_page = context.new_page()
+                scorecard_page.route("**/*", block_unnecessary_resources)
+                scraper_logger.info(f"Attempting to navigate to: {scorecard_url}")
+                response = scorecard_page.goto(scorecard_url, timeout=30000, wait_until="domcontentloaded")
+                scraper_logger.info(f"Scorecard page loaded with status: {response.status if response else 'unknown'}")
+            except Exception as e:
+                scraper_logger.error(f"Failed to load scorecard page {scorecard_url}: {e}")
+                # Skip scorecard page and continue with main scraping
+                scraper_logger.info("Skipping scorecard page, continuing with live page scraping...")
+                scorecard_page = None
             
             # **Step 2: Extract cookies from the browser context**
             cookies = context.cookies()
             scraper_logger.debug(f"Extracted cookies: {cookies}")
             
-            # Close the scorecard tab if it's no longer needed
-            scorecard_page.close()
-            scraper_logger.info("Scorecard tab closed")
+            # Close the scorecard tab if it was opened successfully
+            if scorecard_page:
+                try:
+                    scorecard_page.close()
+                    scraper_logger.info("Scorecard tab closed")
+                except Exception as e:
+                    scraper_logger.warning(f"Error closing scorecard tab: {e}")
             
             # Navigate to the page first to ensure it is loaded
             scraper_logger.info(f"Navigating to URL: {url}")
