@@ -173,9 +173,14 @@ def scrape(page, url):
         if added_urls or deleted_urls:
             if added_urls:
                 logger.info("matches.new_detected", metadata={"count": len(added_urls), "urls": list(added_urls)})
-                for url in added_urls:
+                for i, url in enumerate(added_urls):
                     # URL is already absolute (contains https://crex.com)
-                    logger.info("matches.trigger_scrape", metadata={"url": url})
+                    logger.info("matches.trigger_scrape", metadata={"url": url, "index": i+1, "total": len(added_urls)})
+                    
+                    # Add a small delay between requests to avoid overwhelming the system
+                    if i > 0:
+                        time.sleep(2)
+                    
                     response = requests.post('http://127.0.0.1:5000/start-scrape', json={'url': url})
                     if response.status_code == 200:
                         logger.info("matches.scrape_started", metadata={"url": url})
