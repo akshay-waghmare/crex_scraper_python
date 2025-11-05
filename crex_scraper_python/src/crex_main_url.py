@@ -155,8 +155,12 @@ def scrape(page, url):
             deleted_urls = []
         store_urls(urls)
         
-        token = CricketDataService.get_bearer_token()        
-        CricketDataService.add_live_matches(urls, token)
+        # Optional: Send to backend Java service
+        try:
+            token = CricketDataService.get_bearer_token()        
+            CricketDataService.add_live_matches(urls, token)
+        except Exception as e:
+            logger.warning("backend.service.unavailable", metadata={"error": str(e), "message": "Backend service unavailable, continuing with local scraping"})
         
         if added_urls or deleted_urls:
             if added_urls:
